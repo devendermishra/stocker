@@ -1,7 +1,21 @@
 param(
     [switch]$Bundle,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Help
 )
+
+if ($Help) {
+    @"
+Build the native desktop app in direct mode (in-process stocker-core).
+
+Usage:
+  .\build-standalone.ps1                  # cargo release -> target\release\stocker-web.exe
+  .\build-standalone.ps1 -Bundle          # dx bundle (requires dioxus-cli)
+  .\build-standalone.ps1 -DryRun          # print commands only
+  .\build-standalone.ps1 -Help            # this message
+"@
+    exit 0
+}
 
 $ErrorActionPreference = "Stop"
 
