@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stocker-core",
+    "crates/api",
+    "crates/cli",
+    "frontend",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -1,0 +1,46 @@
+use dioxus::prelude::*;
+
+use crate::components::KeyValue;
+use crate::format::{fmt_money, fmt_opt_pct, fmt_pct};
+use crate::report::CARD;
+use crate::types::ResearchReport;
+
+pub fn financials_tab(r: &ResearchReport) -> Element {
+    let card = CARD;
+    rsx! {
+        section { style: "{card}",
+            h3 { style: "margin-top:0;", "Financial Snapshot" }
+            KeyValue { label: "Revenue", value: fmt_money(r.financials.revenue) }
+            KeyValue { label: "Net Income", value: fmt_money(r.financials.net_income) }
+            KeyValue { label: "EBITDA", value: fmt_money(r.financials.ebitda) }
+            KeyValue { label: "Operating Cashflow", value: fmt_money(r.financials.operating_cashflow) }
+            KeyValue { label: "Free Cashflow", value: fmt_money(r.financials.free_cashflow) }
+            KeyValue { label: "Dividend Yield", value: fmt_pct(r.financials.dividend_yield) }
+            KeyValue { label: "Payout Ratio", value: fmt_pct(r.financials.payout_ratio) }
+            KeyValue { label: "Revenue Growth (YoY)", value: fmt_pct(r.financials.revenue_growth) }
+            KeyValue { label: "Earnings Growth (YoY)", value: fmt_pct(r.financials.earnings_growth) }
+            KeyValue { label: "Previous Close", value: format!("₹{:.2}", r.financials.previous_close) }
+            KeyValue { label: "Ex-dividend Date", value: r.financials.ex_dividend_date.clone().unwrap_or_else(|| "N/A".to_string()) }
+            KeyValue { label: "Insider Holding", value: fmt_pct(r.shareholders.insiders_percent) }
+            KeyValue { label: "Institutional Holding", value: fmt_pct(r.shareholders.institutions_percent) }
+            KeyValue { label: "Promoter Holding", value: fmt_opt_pct(r.shareholders.promoter_percent.map(|v| v * 100.0)) }
+            KeyValue { label: "FII Holding", value: fmt_opt_pct(r.shareholders.fii_percent.map(|v| v * 100.0)) }
+            KeyValue { label: "DII Holding", value: fmt_opt_pct(r.shareholders.dii_percent.map(|v| v * 100.0)) }
+            KeyValue { label: "Mutual Fund Holding", value: fmt_opt_pct(r.shareholders.mutual_fund_percent.map(|v| v * 100.0)) }
+            KeyValue { label: "Retail Holding", value: fmt_opt_pct(r.shareholders.retail_percent.map(|v| v * 100.0)) }
+            KeyValue { label: "Promoter Pledge", value: fmt_opt_pct(r.shareholders.pledge_percent.map(|v| v * 100.0)) }
+        }
+        section { style: "{card}; margin-top: 0.65rem;",
+            h3 { style: "margin-top:0;", "Important Ownership Changes (Interpretation Guide)" }
+            ul {
+                li { "Promoter increasing stake: often positive" }
+                li { "Mutual funds entering: can improve liquidity/re-rating" }
+                li { "FIIs exiting heavily: investigate reason" }
+                li { "Promoter pledge increasing: serious red flag" }
+            }
+            if let Some(note) = &r.shareholders.insider_activity_note {
+                p { style: "color:#273447;", "{note}" }
+            }
+        }
+    }
+}

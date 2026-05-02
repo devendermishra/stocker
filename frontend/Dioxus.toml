@@ -1,0 +1,28 @@
+[application]
+name = "stocker-web"
+default_platform = "web"
+
+[web.app]
+title = "NSE Stock Researcher"
+
+# API base URL for WASM builds only (HTTP to stocker-api). Set at compile time, e.g.:
+# PowerShell: $env:STOCKER_API_URL = "http://127.0.0.1:8080"; dx serve
+# Unix: STOCKER_API_URL=http://127.0.0.1:8080 dx serve
+
+# --- Web (API mode, default Cargo feature `web`) ---
+# From this directory:
+#   dx serve
+#   dx bundle
+# Or: cargo build -p stocker-web --target wasm32-unknown-unknown
+
+# --- Desktop (direct mode: in-process stocker-core, feature `desktop`) ---
+# From this directory (Dioxus CLI passes --no-default-features and enables `desktop` when you set platform):
+#   dx serve --platform desktop
+#   dx bundle --platform desktop
+# Or without dx: cargo run -p stocker-web --no-default-features --features desktop
+
+[bundle]
+identifier = "io.github.stocker-web"
+publisher = "stocker"
+short_description = "NSE stock research (Yahoo-derived data, heuristics)."
+category = "Finance"

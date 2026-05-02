@@ -1,0 +1,28 @@
+[package]
+name = "stocker-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["web"]
+# WASM + HTTP to stocker-api (mutually exclusive with `desktop`).
+web = [
+    "dioxus/web",
+    "dep:gloo-net",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+]
+# Native UI calling stocker_core in-process (standalone app).
+desktop = ["dioxus/desktop", "dep:stocker-core"]
+
+[dependencies]
+dioxus = { version = "0.6", features = ["router"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+urlencoding = "2"
+
+gloo-net = { version = "0.6", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+stocker-core = { path = "../crates/stocker-core", optional = true }
