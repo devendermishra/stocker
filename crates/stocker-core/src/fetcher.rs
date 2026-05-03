@@ -4,7 +4,8 @@ use std::io;
 use std::sync::{Mutex, OnceLock};
 
 use crate::models::{
-    AnnualReport, AssetProfile, Financials, NewsItem, PeerQuote, Shareholders,
+    AnnualReport, AssetProfile, BalanceSheetRow, CashflowRow, ChartBar, ChartHistory, Financials,
+    IncomeStatementRow, NewsItem, PeerQuote, Shareholders, StatementBundle,
 };
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -102,6 +103,209 @@ fn yahoo_raw_f64(v: &Value) -> f64 {
     v.get("raw").and_then(|x| x.as_f64()).unwrap_or(0.0)
 }
 
+fn yahoo_opt_f64(v: &Value) -> Option<f64> {
+    v.get("raw").and_then(|x| x.as_f64()).filter(|x| x.is_finite())
+}
+
+fn end_ts_from_value(end_date: &Value) -> Option<i64> {
+    end_date
+        .get("raw")
+        .and_then(|r| r.as_i64().or_else(|| r.as_f64().map(|f| f as i64)))
+}
+
+pub async fn fetch_chart_history(symbol: &str, range: &str) -> ChartHistory {
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range={}",
+        urlencoding::encode(symbol),
+        range
+    );
+    let client = http_client();
+    let mut res = client.get(&url).send().await;
+    if res.as_ref().map(|r| !r.status().is_success()).unwrap_or(true) {
+        if let Some(crumb) = ensure_yahoo_crumb(client).await {
+            let url_c = format!("{}&crumb={}", url, urlencoding::encode(&crumb));
+            res = client.get(&url_c).send().await;
+        }
+    }
+    let Ok(res) = res else {
+        return ChartHistory::default();
+    };
+    let Ok(text) = res.text().await else {
+        return ChartHistory::default();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return ChartHistory::default();
+    };
+    let result = match v["chart"]["result"].as_array().and_then(|a| a.first()) {
+        Some(r) => r,
+        None => return ChartHistory::default(),
+    };
+    let ts = match result["timestamp"].as_array() {
+        Some(t) => t,
+        None => return ChartHistory::default(),
+    };
+    let quotes = result["indicators"]["quote"]
+        .as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    let opens = quotes["open"].as_array();
+    let highs = quotes["high"].as_array();
+    let lows = quotes["low"].as_array();
+    let closes = quotes["close"].as_array();
+    let vols = quotes["volume"].as_array();
+    let mut bars = Vec::with_capacity(ts.len());
+    for i in 0..ts.len() {
+        let t = ts[i].as_i64().unwrap_or(0);
+        let c = closes
+            .and_then(|a| a.get(i))
+            .and_then(|x| x.as_f64())
+            .filter(|x| x.is_finite() && *x > 0.0);
+        let Some(close) = c else { continue };
+        let open = opens
+            .and_then(|a| a.get(i))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(close);
+        let high = highs
+            .and_then(|a| a.get(i))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(close);
+        let low = lows
+            .and_then(|a| a.get(i))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(close);
+        let volume = vols
+            .and_then(|a| a.get(i))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0);
+        bars.push(ChartBar {
+            ts: t,
+            open,
+            high,
+            low,
+            close,
+            volume,
+        });
+    }
+    ChartHistory { bars }
+}
+
+fn parse_income_rows(arr: Option<&Vec<Value>>) -> Vec<IncomeStatementRow> {
+    let Some(history) = arr else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in history {
+        let end = &item["endDate"];
+        let diluted = yahoo_opt_f64(&item["dilutedEPS"]).or_else(|| yahoo_opt_f64(&item["basicEPS"]));
+        out.push(IncomeStatementRow {
+            end_date_fmt: end["fmt"].as_str().unwrap_or("").to_string(),
+            end_ts: end_ts_from_value(end),
+            revenue: yahoo_raw_f64(&item["totalRevenue"]),
+            cost_of_revenue: yahoo_raw_f64(&item["costOfRevenue"]),
+            gross_profit: yahoo_raw_f64(&item["grossProfit"]),
+            ebitda: yahoo_raw_f64(&item["ebitda"]),
+            operating_income: yahoo_raw_f64(&item["operatingIncome"]),
+            net_income: yahoo_raw_f64(&item["netIncome"]),
+            diluted_eps: diluted,
+        });
+    }
+    out
+}
+
+fn parse_balance_rows(arr: Option<&Vec<Value>>) -> Vec<BalanceSheetRow> {
+    let Some(history) = arr else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in history {
+        let end = &item["endDate"];
+        let cash = yahoo_raw_f64(&item["cash"])
+            + yahoo_raw_f64(&item["cashAndCashEquivalents"])
+            + yahoo_raw_f64(&item["otherShortTermInvestments"]);
+        let debt = yahoo_raw_f64(&item["totalDebt"]).max(yahoo_raw_f64(&item["longTermDebt"])
+            + yahoo_raw_f64(&item["shortLongTermDebtTotal"])
+            + yahoo_raw_f64(&item["currentDebt"]));
+        out.push(BalanceSheetRow {
+            end_date_fmt: end["fmt"].as_str().unwrap_or("").to_string(),
+            end_ts: end_ts_from_value(end),
+            cash,
+            total_debt: debt,
+            total_equity: yahoo_raw_f64(&item["totalStockholderEquity"])
+                .max(yahoo_raw_f64(&item["commonStockTotalEquity"])),
+            total_assets: yahoo_raw_f64(&item["totalAssets"]),
+            total_liabilities: yahoo_raw_f64(&item["totalLiab"])
+                .max(yahoo_raw_f64(&item["totalLiabilitiesNetMinorityInterest"])),
+            current_assets: yahoo_raw_f64(&item["currentAssets"]),
+            current_liabilities: yahoo_raw_f64(&item["currentLiabilities"]),
+            interest_expense: yahoo_raw_f64(&item["interestExpense"]).abs(),
+            inventory: yahoo_raw_f64(&item["inventory"]),
+            net_receivables: yahoo_raw_f64(&item["netReceivables"]),
+        });
+    }
+    out
+}
+
+fn parse_cashflow_rows(arr: Option<&Vec<Value>>) -> Vec<CashflowRow> {
+    let Some(history) = arr else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in history {
+        let end = &item["endDate"];
+        let cfo = yahoo_raw_f64(&item["totalCashFromOperatingActivities"])
+            .max(yahoo_raw_f64(&item["operatingCashflow"]));
+        let capex = yahoo_raw_f64(&item["capitalExpenditures"]).abs();
+        let fcf = yahoo_raw_f64(&item["freeCashflow"]);
+        let fcf = if fcf != 0.0 {
+            fcf
+        } else {
+            cfo - capex
+        };
+        out.push(CashflowRow {
+            end_date_fmt: end["fmt"].as_str().unwrap_or("").to_string(),
+            end_ts: end_ts_from_value(end),
+            operating_cashflow: cfo,
+            capital_expenditure: capex,
+            free_cashflow: fcf,
+        });
+    }
+    out
+}
+
+pub async fn fetch_statement_bundle(symbol: &str) -> StatementBundle {
+    let modules = "incomeStatementHistory,incomeStatementHistoryQuarterly,balanceSheetHistory,balanceSheetHistoryQuarterly,cashflowStatementHistory,cashflowStatementHistoryQuarterly";
+    let Ok(v) = fetch_quote_summary(symbol, modules).await else {
+        return StatementBundle::default();
+    };
+    let result = &v["quoteSummary"]["result"][0];
+    let inc_a = result["incomeStatementHistory"]["incomeStatementHistory"].as_array();
+    let inc_q = result["incomeStatementHistoryQuarterly"]["incomeStatementHistoryQuarterly"].as_array();
+    let bal_a = result["balanceSheetHistory"]["balanceSheetHistory"].as_array();
+    let bal_q = result["balanceSheetHistoryQuarterly"]["balanceSheetHistoryQuarterly"].as_array();
+    let cf = &result["cashflowStatementHistory"];
+    let cf_a = cf["cashflowStatements"]
+        .as_array()
+        .or_else(|| cf["cashflowStatementHistory"].as_array());
+    let cfq = &result["cashflowStatementHistoryQuarterly"];
+    let cf_q = cfq["cashflowStatements"]
+        .as_array()
+        .or_else(|| cfq["cashflowStatementHistoryQuarterly"].as_array());
+    StatementBundle {
+        income_annual: parse_income_rows(inc_a),
+        income_quarterly: parse_income_rows(inc_q),
+        balance_annual: parse_balance_rows(bal_a),
+        balance_quarterly: parse_balance_rows(bal_q),
+        cashflow_annual: parse_cashflow_rows(cf_a),
+        cashflow_quarterly: parse_cashflow_rows(cf_q),
+    }
+}
+
+fn parse_roce_from_financial_data(fd: &Value) -> Option<f64> {
+    yahoo_opt_f64(&fd["returnOnCapital"])
+        .or_else(|| yahoo_opt_f64(&fd["returnOnInvestedCapital"]))
+}
+
 pub async fn fetch_financials(symbol: &str) -> Financials {
     match fetch_quote_summary(symbol, "financialData,defaultKeyStatistics,summaryDetail,price").await {
         Ok(v) => {
@@ -146,22 +350,51 @@ pub async fn fetch_financials(symbol: &str) -> Financials {
             let beta_sd = yahoo_raw_f64(&summary_detail["beta"]);
             let beta = if beta_ks > 0.0 { beta_ks } else { beta_sd };
 
+            let revenue = yahoo_raw_f64(&financial_data["totalRevenue"]);
+            let ebitda_v = yahoo_raw_f64(&financial_data["ebitda"]);
+            let gross_m = yahoo_raw_f64(&financial_data["grossMargins"]);
+            let op_m = yahoo_raw_f64(&financial_data["operatingMargins"]);
+            let ebitda_m = yahoo_raw_f64(&financial_data["ebitdaMargins"]);
+            let ebitda_m = if ebitda_m > 0.0 {
+                ebitda_m
+            } else if revenue > 0.0 && ebitda_v > 0.0 {
+                ebitda_v / revenue
+            } else {
+                0.0
+            };
+            let ev = yahoo_raw_f64(&financial_data["enterpriseValue"]);
+            let cash = yahoo_raw_f64(&financial_data["totalCash"]);
+            let roa = yahoo_opt_f64(&financial_data["returnOnAssets"]);
+            let roce = parse_roce_from_financial_data(financial_data);
+            let ps = yahoo_raw_f64(&key_stats["priceToSalesTrailing12Months"])
+                .max(yahoo_raw_f64(&summary_detail["priceToSalesTrailing12Months"]));
+            let vol = yahoo_raw_f64(&price_mod["regularMarketVolume"]);
+            let avg10 = yahoo_raw_f64(&price_mod["averageDailyVolume10Day"]);
+
             Financials {
-                revenue: yahoo_raw_f64(&financial_data["totalRevenue"]),
+                revenue,
                 net_income: yahoo_raw_f64(&financial_data["netIncomeToCommon"]),
                 pe_ratio: pe_display,
                 forward_pe,
                 total_debt: yahoo_raw_f64(&financial_data["totalDebt"]),
-                ebitda: yahoo_raw_f64(&financial_data["ebitda"]),
+                ebitda: ebitda_v,
                 profit_margins: yahoo_raw_f64(&financial_data["profitMargins"]),
+                gross_margins: gross_m,
+                operating_margins: op_m,
+                ebitda_margins: ebitda_m,
                 return_on_equity: yahoo_raw_f64(&financial_data["returnOnEquity"]),
+                return_on_assets: roa,
+                return_on_capital_employed: roce,
                 debt_to_equity: yahoo_raw_f64(&financial_data["debtToEquity"]),
                 free_cashflow: yahoo_raw_f64(&financial_data["freeCashflow"]),
                 operating_cashflow: yahoo_raw_f64(&financial_data["operatingCashflow"]),
                 shares_outstanding: yahoo_raw_f64(&key_stats["sharesOutstanding"]),
                 market_cap: yahoo_raw_f64(&price_mod["marketCap"]),
+                enterprise_value: ev,
+                total_cash: cash,
                 book_value,
                 price_to_book,
+                price_to_sales: ps,
                 trailing_eps,
                 forward_eps,
                 dividend_yield: div_yield,
@@ -174,6 +407,8 @@ pub async fn fetch_financials(symbol: &str) -> Financials {
                 fifty_two_week_low: wk_lo,
                 beta: beta.max(0.0),
                 ex_dividend_date: ex_div,
+                regular_market_volume: vol,
+                average_volume_10_day: avg10,
             }
         }
         Err(e) => {
@@ -274,6 +509,13 @@ pub async fn fetch_asset_profile(symbol: &str) -> AssetProfile {
                 sector: ap["sector"].as_str().map(String::from),
                 industry: ap["industry"].as_str().map(String::from),
                 long_business_summary: ap["longBusinessSummary"].as_str().map(String::from),
+                website: ap["website"].as_str().map(String::from),
+                country: ap["country"].as_str().map(String::from),
+                exchange: price["exchange"]
+                    .as_str()
+                    .or_else(|| price["fullExchangeName"].as_str())
+                    .map(String::from),
+                currency: price["currency"].as_str().map(String::from),
             }
         }
         Err(e) => {
@@ -608,13 +850,19 @@ pub async fn fetch_peer_quotes(symbols: &[String]) -> Vec<PeerQuote> {
     }
     let mut rows = Vec::new();
     for symbol in symbols {
-        let Ok(v) = fetch_quote_summary(symbol, "price,financialData,summaryDetail,assetProfile").await else {
+        let Ok(v) = fetch_quote_summary(
+            symbol,
+            "price,financialData,summaryDetail,assetProfile,defaultKeyStatistics",
+        )
+        .await
+        else {
             continue;
         };
         let result = &v["quoteSummary"]["result"][0];
         let price_mod = &result["price"];
         let financial_data = &result["financialData"];
         let summary_detail = &result["summaryDetail"];
+        let key_stats = &result["defaultKeyStatistics"];
         let symbol = price_mod["symbol"]
             .as_str()
             .unwrap_or(symbol)
@@ -624,6 +872,9 @@ pub async fn fetch_peer_quotes(symbols: &[String]) -> Vec<PeerQuote> {
             .as_f64()
             .or_else(|| summary_detail["forwardPE"]["raw"].as_f64())
             .unwrap_or(0.0);
+        let forward_pe = summary_detail["forwardPE"]["raw"].as_f64().unwrap_or(0.0);
+        let pb = yahoo_raw_f64(&key_stats["priceToBook"]).max(yahoo_raw_f64(&summary_detail["priceToBook"]));
+        let ps = yahoo_raw_f64(&key_stats["priceToSalesTrailing12Months"]);
         let ebitda = financial_data["ebitda"]["raw"].as_f64().unwrap_or(0.0);
         let ev = financial_data["enterpriseValue"]["raw"].as_f64().unwrap_or(0.0);
         let ev_to_ebitda = if ev > 0.0 && ebitda > 0.0 {
@@ -633,11 +884,18 @@ pub async fn fetch_peer_quotes(symbols: &[String]) -> Vec<PeerQuote> {
         };
         let mcap = price_mod["marketCap"]["raw"].as_f64().unwrap_or(0.0);
         let revenue = financial_data["totalRevenue"]["raw"].as_f64().unwrap_or(0.0);
+        let ev_to_sales = if ev > 0.0 && revenue > 0.0 {
+            Some(ev / revenue)
+        } else {
+            None
+        };
         let revenue_growth = financial_data["revenueGrowth"]["raw"].as_f64().unwrap_or(0.0);
         let pat_growth = financial_data["earningsGrowth"]["raw"].as_f64().unwrap_or(0.0);
         let roe = financial_data["returnOnEquity"]["raw"].as_f64().unwrap_or(0.0);
-        let roce = financial_data["returnOnAssets"]["raw"].as_f64();
+        let roa = yahoo_opt_f64(&financial_data["returnOnAssets"]);
+        let roce = parse_roce_from_financial_data(financial_data);
         let margin = financial_data["profitMargins"]["raw"].as_f64().unwrap_or(0.0);
+        let avg10 = yahoo_raw_f64(&price_mod["averageDailyVolume10Day"]);
         let ebitda_margin = if revenue > 0.0 && ebitda > 0.0 {
             ebitda / revenue
         } else {
@@ -656,7 +914,11 @@ pub async fn fetch_peer_quotes(symbols: &[String]) -> Vec<PeerQuote> {
             short_name: price_mod["shortName"].as_str().map(String::from),
             price,
             pe_ratio: pe,
+            forward_pe,
+            price_to_book: pb,
+            price_to_sales: ps,
             ev_to_ebitda,
+            ev_to_sales,
             market_cap: mcap,
             revenue,
             revenue_growth,
@@ -665,10 +927,12 @@ pub async fn fetch_peer_quotes(symbols: &[String]) -> Vec<PeerQuote> {
             ebitda_margin,
             return_on_equity: roe,
             return_on_capital_employed: roce,
+            return_on_assets: roa,
             profit_margins: margin,
             debt_to_equity,
             free_cashflow,
             officer_pay,
+            average_volume_10_day: avg10,
         });
     }
     rows

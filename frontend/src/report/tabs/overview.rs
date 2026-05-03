@@ -1,12 +1,13 @@
 use dioxus::prelude::*;
 
 use crate::components::MetricCard;
-use crate::format::{fmt_money, fmt_opt_pct, fmt_pct};
+use crate::format::{fmt_money, fmt_opt_pct, fmt_pct, fmt_price_in_currency};
 use crate::report::CARD;
 use crate::types::ResearchReport;
 
 pub fn overview_tab(r: &ResearchReport) -> Element {
     let card = CARD;
+    let cur = r.asset_profile.currency.as_deref();
     rsx! {
         section { style: "{card}",
             h3 { style: "margin-top:0;", "Executive Summary" }
@@ -37,7 +38,7 @@ pub fn overview_tab(r: &ResearchReport) -> Element {
             MetricCard { label: "Revenue CAGR (3Y)", value: fmt_opt_pct(r.stock_analysis.revenue_cagr_trailing_3y_pct) }
             MetricCard { label: "Net Income CAGR (3Y)", value: fmt_opt_pct(r.stock_analysis.net_income_cagr_trailing_3y_pct) }
             MetricCard { label: "Beta", value: if r.financials.beta > 0.0 { format!("{:.2}", r.financials.beta) } else { "N/A".to_string() } }
-            MetricCard { label: "52W Low / High", value: format!("₹{:.2} / ₹{:.2}", r.financials.fifty_two_week_low, r.financials.fifty_two_week_high) }
+            MetricCard { label: "52W Low / High", value: format!("{} / {}", fmt_price_in_currency(r.financials.fifty_two_week_low, cur), fmt_price_in_currency(r.financials.fifty_two_week_high, cur)) }
             MetricCard { label: "Day Change", value: fmt_pct(r.financials.regular_market_change_percent) }
         }
         section { style: "{card}; margin-top: 0.65rem;",

@@ -1,3 +1,13 @@
+pub fn fmt_price_in_currency(price: f64, currency: Option<&str>) -> String {
+    let sym = match currency.unwrap_or("INR") {
+        "USD" => "$",
+        "GBP" => "£",
+        "EUR" => "€",
+        _ => "₹",
+    };
+    format!("{sym}{p:.2}", sym = sym, p = price)
+}
+
 pub fn fmt_money(v: f64) -> String {
     if v == 0.0 {
         return "N/A".to_string();

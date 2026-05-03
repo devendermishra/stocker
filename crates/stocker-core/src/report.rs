@@ -6,14 +6,22 @@ use crate::analysis::{
 };
 use crate::error::Result;
 use crate::fetcher::{
-    discover_nse_peer_symbols, fetch_annual_reports, fetch_asset_profile, fetch_company_news,
-    fetch_financials, fetch_officer_pay, fetch_peer_quotes, fetch_price, fetch_sector_news,
-    fetch_shareholders,
+    discover_nse_peer_symbols, fetch_annual_reports, fetch_asset_profile, fetch_chart_history,
+    fetch_company_news, fetch_financials, fetch_officer_pay, fetch_peer_quotes, fetch_price,
+    fetch_sector_news, fetch_shareholders, fetch_statement_bundle,
 };
+use crate::fundamental_analysis::build_fundamental_analysis;
 use crate::models::{
-    AssetProfile, Financials, ManagementAnalysis, NewsItem, PeerAnalysis, PeerQuote, ReportInsights,
-    ScoreBreakdown, SectorAnalysisDetail, Shareholders, StockAnalysis, StructuredResearchSections,
+    AssetProfile, CompanyOverview, Financials, FundamentalAnalysis, ManagementAnalysis, NewsItem,
+    PeerAnalysis, PeerQuote, ReportInsights, ResearchRating, ResearchSummary, ScoreBreakdown,
+    SectorAnalysisDetail, Shareholders, StockAnalysis, StructuredResearchSections,
+    TechnicalAnalysis, TechnicalEntrySignal, ValuationAnalysis,
 };
+use crate::research_summary::{build_company_overview, build_research_summary};
+use crate::stock_scoring::build_research_rating;
+use crate::technical_analysis::build_technical_analysis;
+use crate::technical_entry_signal::build_technical_entry_signal;
+use crate::valuation_analysis::build_valuation_analysis;
 use crate::symbol::normalize_nse_symbol;
 
 #[derive(Debug, Serialize)]
@@ -35,19 +43,37 @@ pub struct ResearchReport {
     pub report_insights: ReportInsights,
     pub structured_sections: StructuredResearchSections,
     pub score_breakdown: ScoreBreakdown,
+    pub company_overview: CompanyOverview,
+    pub fundamental_analysis: FundamentalAnalysis,
+    pub valuation_analysis: ValuationAnalysis,
+    pub technical_analysis: TechnicalAnalysis,
+    pub technical_entry: TechnicalEntrySignal,
+    pub research_rating: ResearchRating,
+    pub research_summary: ResearchSummary,
 }
 
 /// Fetch and analyze one NSE symbol (Yahoo `*.NS`).
 pub async fn build_research_report(raw_symbol: &str) -> Result<ResearchReport> {
     let symbol = normalize_nse_symbol(raw_symbol)?;
 
-    let (price, mut financials, shareholders, annual_reports, officer_pay, profile) = tokio::join!(
+    let (
+        price,
+        mut financials,
+        shareholders,
+        annual_reports,
+        officer_pay,
+        profile,
+        statements,
+        chart,
+    ) = tokio::join!(
         fetch_price(&symbol),
         fetch_financials(&symbol),
         fetch_shareholders(&symbol),
         fetch_annual_reports(&symbol),
         fetch_officer_pay(&symbol),
         fetch_asset_profile(&symbol),
+        fetch_statement_bundle(&symbol),
+        fetch_chart_history(&symbol, "5y"),
     );
 
     if financials.net_income <= 0.0 {
@@ -104,8 +130,18 @@ pub async fn build_research_report(raw_symbol: &str) -> Result<ResearchReport> {
             short_name: profile.long_name.clone(),
             price,
             pe_ratio: financials.pe_ratio,
-            ev_to_ebitda: if financials.ebitda > 0.0 && financials.market_cap > 0.0 {
+            forward_pe: financials.forward_pe,
+            price_to_book: financials.price_to_book,
+            price_to_sales: financials.price_to_sales,
+            ev_to_ebitda: if financials.enterprise_value > 0.0 && financials.ebitda > 0.0 {
+                Some(financials.enterprise_value / financials.ebitda)
+            } else if financials.ebitda > 0.0 && financials.market_cap > 0.0 {
                 Some(financials.market_cap / financials.ebitda)
+            } else {
+                None
+            },
+            ev_to_sales: if financials.enterprise_value > 0.0 && financials.revenue > 0.0 {
+                Some(financials.enterprise_value / financials.revenue)
             } else {
                 None
             },
@@ -120,11 +156,13 @@ pub async fn build_research_report(raw_symbol: &str) -> Result<ResearchReport> {
                 0.0
             },
             return_on_equity: financials.return_on_equity,
-            return_on_capital_employed: None,
+            return_on_capital_employed: financials.return_on_capital_employed,
+            return_on_assets: financials.return_on_assets,
             profit_margins: financials.profit_margins,
             debt_to_equity: financials.debt_to_equity,
             free_cashflow: financials.free_cashflow,
             officer_pay,
+            average_volume_10_day: financials.average_volume_10_day,
         });
 
     let peer_only: Vec<PeerQuote> = quote_rows
@@ -162,6 +200,49 @@ pub async fn build_research_report(raw_symbol: &str) -> Result<ResearchReport> {
         &shareholders,
     );
 
+    let company_overview = build_company_overview(
+        &symbol,
+        &profile,
+        &financials,
+        price,
+        &statements,
+    );
+    let fundamental_analysis =
+        build_fundamental_analysis(&statements, &financials, &annual_reports);
+    let valuation_analysis = build_valuation_analysis(
+        price,
+        &financials,
+        &chart,
+        &statements,
+        &subject_quote,
+        &peer_only,
+        &fundamental_analysis,
+    );
+    let technical_analysis = build_technical_analysis(price, &financials, &chart);
+    let technical_entry = build_technical_entry_signal(
+        &technical_analysis,
+        &fundamental_analysis,
+        &valuation_analysis,
+    );
+    let research_rating = build_research_rating(
+        &financials,
+        &fundamental_analysis,
+        &valuation_analysis,
+        &technical_analysis,
+        &technical_entry,
+        &peer_only,
+        &shareholders,
+        &structured_sections.risks,
+    );
+    let research_summary = build_research_summary(
+        &fundamental_analysis,
+        &valuation_analysis,
+        &technical_analysis,
+        &technical_entry,
+        &research_rating,
+        &structured_sections.risks,
+    );
+
     Ok(ResearchReport {
         symbol: symbol.clone(),
         long_name: profile.long_name.clone(),
@@ -180,5 +261,12 @@ pub async fn build_research_report(raw_symbol: &str) -> Result<ResearchReport> {
         report_insights,
         structured_sections,
         score_breakdown,
+        company_overview,
+        fundamental_analysis,
+        valuation_analysis,
+        technical_analysis,
+        technical_entry,
+        research_rating,
+        research_summary,
     })
 }

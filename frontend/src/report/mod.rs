@@ -5,11 +5,12 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 use crate::api::load_research_report;
+use crate::format::fmt_price_in_currency;
 use crate::routes::Route;
 
 use tabs::{
     company_news_tab, financials_tab, framework_tab, management_tab, overview_tab, peers_tab,
-    sector_tab,
+    research_tab, sector_tab,
 };
 
 pub const CARD: &str =
@@ -41,13 +42,13 @@ pub fn Report(symbol: String) -> Element {
                     rsx! {
                         div { style: "display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 0.6rem; margin: 0.75rem 0 1rem;",
                             div { style: "{card}", h3 { style: "margin: 0 0 0.25rem; font-size: 0.92rem; color:#555;", "Company" } p { style: "margin:0; font-weight: 600;", "{title}" } }
-                            div { style: "{card}", h3 { style: "margin: 0 0 0.25rem; font-size: 0.92rem; color:#555;", "Last Price" } p { style: "margin:0; font-weight: 700;", "₹{r.price:.2}" } }
+                            div { style: "{card}", h3 { style: "margin: 0 0 0.25rem; font-size: 0.92rem; color:#555;", "Last Price" } p { style: "margin:0; font-weight: 700;", "{fmt_price_in_currency(r.price, r.asset_profile.currency.as_deref())}" } }
                             div { style: "{card}", h3 { style: "margin: 0 0 0.25rem; font-size: 0.92rem; color:#555;", "Sector / Industry" } p { style: "margin:0;", "{r.asset_profile.sector.clone().unwrap_or_else(|| \"N/A\".to_string())} / {r.asset_profile.industry.clone().unwrap_or_else(|| \"N/A\".to_string())}" } }
                             div { style: "{card}", h3 { style: "margin: 0 0 0.25rem; font-size: 0.92rem; color:#555;", "Valuation Label" } p { style: "margin:0;", "{r.stock_analysis.valuation_label}" } }
                         }
 
                         div { style: "display: flex; gap: 0.35rem; margin: 0.7rem 0 1rem; flex-wrap: wrap; border-bottom: 1px solid #ddd; padding-bottom: 0.6rem;",
-                            for (i, label) in ["Overview", "Financials", "Sector", "Peers", "News", "Management", "Framework"].iter().enumerate() {
+                            for (i, label) in ["Overview", "Research", "Financials", "Sector", "Peers", "News", "Management", "Framework"].iter().enumerate() {
                                 button {
                                     style: if tab() == i as i32 {
                                         "padding: 0.38rem 0.8rem; border: none; background: #184ad8; color: white; border-radius: 8px; cursor: pointer;"
@@ -62,11 +63,12 @@ pub fn Report(symbol: String) -> Element {
 
                         match tab() {
                             0 => rsx! { {overview_tab(r)} },
-                            1 => rsx! { {financials_tab(r)} },
-                            2 => rsx! { {sector_tab(r)} },
-                            3 => rsx! { {peers_tab(r)} },
-                            4 => rsx! { {company_news_tab(r)} },
-                            5 => rsx! { {management_tab(r)} },
+                            1 => rsx! { {research_tab(r)} },
+                            2 => rsx! { {financials_tab(r)} },
+                            3 => rsx! { {sector_tab(r)} },
+                            4 => rsx! { {peers_tab(r)} },
+                            5 => rsx! { {company_news_tab(r)} },
+                            6 => rsx! { {management_tab(r)} },
                             _ => rsx! { {framework_tab(r)} },
                         }
                     }
