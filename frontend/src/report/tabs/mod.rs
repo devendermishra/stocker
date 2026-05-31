@@ -6,8 +6,10 @@ mod overview;
 mod peers;
 mod research;
 mod sector;
+mod stock_detail;
 
 pub use company_news::company_news_tab;
+pub use stock_detail::StockDetailedInformation;
 pub use financials::financials_tab;
 pub use framework::framework_tab;
 pub use management::management_tab;

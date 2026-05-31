@@ -21,9 +21,9 @@ pub fn evaluate_quality(financials: &Financials) -> f64 {
         score -= 5.0;
     }
 
-    if financials.debt_to_equity < 50.0 {
+    if financials.debt_to_equity < 0.50 {
         score += 10.0;
-    } else if financials.debt_to_equity > 150.0 {
+    } else if financials.debt_to_equity > 1.50 {
         score -= 10.0;
     }
 
@@ -336,9 +336,9 @@ pub fn compute_report_insights(
     } else if stock.quality_score < 40.0 {
         watch.push("Composite quality score is on the low side; dig into drivers (margins, ROE, debt, FCF).".to_string());
     }
-    if financials.debt_to_equity > 100.0 {
+    if financials.debt_to_equity > 1.00 {
         watch.push("Debt-to-equity (Yahoo) is elevated; review leverage vs peers and covenants.".to_string());
-    } else if financials.debt_to_equity < 30.0 && financials.debt_to_equity > 0.0 {
+    } else if financials.debt_to_equity < 0.30 && financials.debt_to_equity > 0.0 {
         strengths.push("Debt-to-equity (Yahoo) is relatively light vs higher-leverage screen.".to_string());
     }
     if let Some(fy) = stock.fcf_yield_pct {
@@ -797,7 +797,7 @@ pub fn categorize_risks(
     let mut financial_risks = vec![
         RiskItem { category: RiskCategory::Financial, risk: "Working capital stress".to_string(), severity: "Medium".to_string(), note: "Cross-check receivable/inventory days in filings.".to_string() },
     ];
-    if financials.debt_to_equity > 100.0 {
+    if financials.debt_to_equity > 1.00 {
         financial_risks.push(RiskItem { category: RiskCategory::Financial, risk: "High debt".to_string(), severity: "High".to_string(), note: "Debt/equity is elevated versus comfort zone.".to_string() });
     }
     if financials.free_cashflow <= 0.0 {
@@ -848,7 +848,7 @@ pub fn compute_weighted_score(
     let industry_tailwind = clamp_score(9.0 + (financials.revenue_growth * 20.0), 15.0);
     let financial_strength = clamp_score(
         ((financials.return_on_equity * 100.0).min(20.0) / 20.0) * 12.0
-            + if financials.debt_to_equity < 60.0 { 8.0 } else { 4.0 },
+            + if financials.debt_to_equity < 0.60 { 8.0 } else { 4.0 },
         20.0,
     );
     let management_quality = clamp_score((management.pay_vs_revenue_score / 100.0) * 15.0, 15.0);
@@ -902,7 +902,7 @@ pub fn build_monitorables(financials: &Financials) -> Vec<MonitorableItem> {
         MonitorableItem { area: "Margin".to_string(), what_to_track: "Expansion or contraction".to_string(), status: if financials.profit_margins > 0.10 { "Healthy".to_string() } else { "Watch".to_string() } },
         MonitorableItem { area: "Volume".to_string(), what_to_track: "User/customer/order growth".to_string(), status: "Track via quarterly disclosures".to_string() },
         MonitorableItem { area: "Market share".to_string(), what_to_track: "Gaining or losing".to_string(), status: "Track with industry data".to_string() },
-        MonitorableItem { area: "Debt".to_string(), what_to_track: "Increasing or reducing".to_string(), status: if financials.debt_to_equity < 70.0 { "Comfortable".to_string() } else { "Elevated".to_string() } },
+        MonitorableItem { area: "Debt".to_string(), what_to_track: "Increasing or reducing".to_string(), status: if financials.debt_to_equity < 0.70 { "Comfortable".to_string() } else { "Elevated".to_string() } },
         MonitorableItem { area: "Cash flow".to_string(), what_to_track: "CFO/PAT ratio".to_string(), status: if financials.net_income > 0.0 && financials.operating_cashflow / financials.net_income >= 1.0 { "Strong".to_string() } else { "Watch".to_string() } },
         MonitorableItem { area: "Capex".to_string(), what_to_track: "On time or delayed".to_string(), status: "Track management commentary".to_string() },
         MonitorableItem { area: "Management guidance".to_string(), what_to_track: "Upgraded or downgraded".to_string(), status: "Track each quarter".to_string() },

@@ -23,6 +23,11 @@ pub fn Home() -> Element {
                     style: "padding: 0.55rem 1rem; background: #184ad8; color: white; border-radius: 8px; text-decoration: none; font-weight: 600;",
                     "Generate Report"
                 }
+                Link {
+                    to: Route::Screener {},
+                    style: "padding: 0.55rem 1rem; background: #fff; color: #184ad8; border: 1px solid #184ad8; border-radius: 8px; text-decoration: none; font-weight: 600;",
+                    "Open Screener"
+                }
             }
         }
     }

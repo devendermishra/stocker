@@ -18,7 +18,10 @@ function Require-Command([string]$name, [string]$hint) {
 Require-Command "cargo" "Install Rust and make sure cargo is on PATH."
 Require-Command "dx" "Install Dioxus CLI: cargo install dioxus-cli --locked"
 
-$apiCommand = "Set-Location '$repoRoot'; cargo run -p stocker-api"
+$dbPath = Join-Path $repoRoot "stocker.db"
+$equityCsv = Join-Path $repoRoot "data\EQUITY_L.csv"
+$envBlock = "`$env:STOCKER_DB_PATH = '$dbPath'; `$env:STOCKER_UNIVERSE_CSV = '$equityCsv'"
+$apiCommand = "Set-Location '$repoRoot'; $envBlock; cargo run -p stocker-api"
 $webCommand = "Set-Location '$frontendDir'; `$env:STOCKER_API_URL = '$apiUrl'; dx serve --port 8081"
 
 Write-Host "Starting Stocker API + Web UI..."

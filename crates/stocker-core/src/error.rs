@@ -10,6 +10,8 @@ pub enum StockerError {
     InvalidSymbol(String),
     #[error("No quote data for symbol")]
     NoQuoteData,
+    #[error("Forbidden remote data source: {0}")]
+    ForbiddenDataSource(String),
 }
 
 pub type Result<T> = std::result::Result<T, StockerError>;

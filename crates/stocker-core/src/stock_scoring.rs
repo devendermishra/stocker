@@ -124,9 +124,9 @@ pub fn build_research_rating(
 
     // Risk: start 100, subtract penalties (then invert for "risk score" display as 0-100 higher=worse)
     let mut risk_penalties = 0.0_f64;
-    if financials.debt_to_equity > 120.0 {
+    if financials.debt_to_equity > 1.20 {
         risk_penalties += 18.0;
-    } else if financials.debt_to_equity > 80.0 {
+    } else if financials.debt_to_equity > 0.80 {
         risk_penalties += 10.0;
     }
     if shareholders.pledge_percent.unwrap_or(0.0) > 0.0 {
