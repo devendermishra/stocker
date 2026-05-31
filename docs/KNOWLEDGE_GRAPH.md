@@ -1,8 +1,12 @@
 # Stocker Project Knowledge Graph
 
+Operational run commands and troubleshooting: [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md).
+
 ## Project summary
 
 **stocker** is an NSE-oriented stock research workspace. It fetches data from **Yahoo Finance unofficial HTTP APIs** (the same endpoints Python **yfinance** uses), but implements fetching in Rust via **reqwest** in [`crates/stocker-core/src/fetcher.rs`](../crates/stocker-core/src/fetcher.rs) — there is no Python yfinance dependency.
+
+A **screener** subsystem (`stocker-screener`) stores ~110 metrics per NSE symbol in SQLite, with a tiered background refresh job and AND-filter query engine.
 
 ```mermaid
 flowchart TB
@@ -23,17 +27,31 @@ flowchart TB
     Analysis[analysis / valuation / technical / scoring]
   end
 
+  subgraph screener [Screener subsystem]
+    Svc[ScreenerService]
+    SQLite[(stocker.db SQLite)]
+    Scheduler[RefreshScheduler]
+    Query[ScreenQuery engine]
+  end
+
   subgraph external [External]
     Yahoo[Yahoo Finance APIs]
   end
 
-  WebUI -->|GET /api/v1/symbols/sym/report| Axum
+  WebUI -->|GET report + POST screener/search| Axum
   HTTPClient --> Axum
   DeskUI --> Report
+  DeskUI --> Svc
   CLI --> Report
+  CLI --> Svc
   Axum --> Report
+  Axum --> Svc
   Report --> Fetch
   Report --> Analysis
+  Svc --> SQLite
+  Svc --> Scheduler
+  Svc --> Query
+  Scheduler --> Fetch
   Fetch --> Yahoo
 ```
 
@@ -44,11 +62,26 @@ flowchart TB
 | Node | Path | Role |
 |------|------|------|
 | **stocker-core** | [`crates/stocker-core/`](../crates/stocker-core/) | Fetch, models, analysis, `build_research_report` |
-| **stocker-api** | [`crates/api/`](../crates/api/) | Axum HTTP server on `127.0.0.1:8080` |
-| **stocker-cli** | [`crates/cli/`](../crates/cli/) | Headless: symbol → JSON stdout |
-| **stocker-web** | [`frontend/`](../frontend/) | Dioxus UI (not Tauri, not npm) |
+| **stocker-screener** | [`crates/stocker-screener/`](../crates/stocker-screener/) | SQLite snapshots, metric catalog, refresh scheduler, AND filters |
+| **stocker-api** | [`crates/api/`](../crates/api/) | Axum HTTP server on `127.0.0.1:8080` (research + screener routes) |
+| **stocker-cli** | [`crates/cli/`](../crates/cli/) | Headless: reports, screener queries, universe sync, backfill |
+| **stocker-web** | [`frontend/`](../frontend/) | Dioxus UI — research + screener (not Tauri, not npm) |
 
 Workspace root: [`Cargo.toml`](../Cargo.toml)
+
+---
+
+## How to run (summary)
+
+| Goal | Command |
+|------|---------|
+| **Desktop app** (research + screener, no API) | `cd frontend && dx serve --platform desktop` |
+| **Browser UI + screener** | Terminal 1: `cargo run -p stocker-api` · Terminal 2: `cd frontend && dx serve --port 8081` |
+| **Windows both-at-once** | `.\run-dev.ps1` |
+| **CLI screener query** | `cargo run -p stocker-cli -- screener --query query.json` |
+| **Release desktop binary** | `.\build-standalone.ps1` or `./build-standalone.sh` |
+
+See [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md) for full steps, env vars, and troubleshooting.
 
 ---
 
@@ -70,19 +103,48 @@ Workspace root: [`Cargo.toml`](../Cargo.toml)
 | `stock_scoring.rs` | Composite `ResearchRating` |
 | `research_summary.rs` | `CompanyOverview`, `ResearchSummary` |
 
+### Screener modules ([`stocker-screener/src/`](../crates/stocker-screener/src/))
+
+| Module | Responsibility |
+|--------|----------------|
+| `db.rs` | SQLite pool, migrations, schema validation |
+| `metrics.rs` | Metric catalog (~110 fields, categories, units) |
+| `snapshot.rs` | Upsert symbol + metric rows from Yahoo fetch |
+| `compute.rs` | Derived / composite metrics |
+| `query.rs` | `ScreenQuery` → SQL (AND filters, sort, limit) |
+| `refresh.rs` | Tiered scheduler, pacing, backfill |
+| `service.rs` | Public façade (`ScreenerService`) for API + desktop |
+| `screens.rs` | Saved screen CRUD |
+| `universe.rs` | Load symbols from local CSV (no NSE network) |
+
 ### API surface ([`crates/api/src/lib.rs`](../crates/api/src/lib.rs))
 
+**Research:**
+
 - `GET /health` → `{"status":"ok"}`
-- `GET /api/v1/symbols/{symbol}/report` → `ResearchReport` JSON (calls `stocker_core::build_research_report`)
+- `GET /api/v1/symbols/{symbol}/report` → `ResearchReport` JSON
 
-### Entry points → core
+**Screener** ([`crates/api/src/screener.rs`](../crates/api/src/screener.rs)):
 
-| Entry | Invocation |
-|-------|------------|
-| CLI | `stocker_core::build_research_report(&symbol)` |
-| API | Same, via [`handlers.rs`](../crates/api/src/handlers.rs) |
-| Desktop UI | Direct in [`frontend/src/api.rs`](../frontend/src/api.rs) (`feature = "desktop"`) |
-| Web UI | HTTP to API (`feature = "web"`) |
+- `GET /api/v1/screener/fields` — metric catalog
+- `POST /api/v1/screener/search` — `ScreenQuery` → matching rows
+- `GET /api/v1/screener/status` — scheduler + universe stats
+- `GET /api/v1/screener/coverage` — per-metric fill rates
+- `GET/POST/PUT/DELETE /api/v1/screener/screens` — saved screens
+- `GET /api/v1/screener/snapshot/{symbol}` — full snapshot for one symbol
+- `POST /api/v1/screener/refresh/{symbol}` — force-refresh one symbol
+- `POST /api/v1/screener/backfill` — universe backfill (409 if already running)
+- `POST /api/v1/screener/recompute` — recompute composites
+- `POST /api/v1/screener/scheduler/stop` — stop scheduler
+
+### Entry points → core / screener
+
+| Entry | Research | Screener |
+|-------|----------|----------|
+| CLI | `stocker_core::build_research_report` | `ScreenerService` (open DB, query, backfill) |
+| API | Same via [`handlers.rs`](../crates/api/src/handlers.rs) | Same via [`screener.rs`](../crates/api/src/screener.rs) |
+| Desktop UI | [`frontend/src/api.rs`](../frontend/src/api.rs) (`feature = "desktop"`) | [`frontend/src/screener_api.rs`](../frontend/src/screener_api.rs) (`feature = "desktop"`) |
+| Web UI | HTTP to API (`feature = "web"`) | HTTP to API (`feature = "web"`) |
 
 ---
 
@@ -101,34 +163,90 @@ flowchart LR
   subgraph deskMode [Standalone feature desktop]
     Native[Native Dioxus Desktop]
     CoreDirect[stocker_core in-process]
+    ScreenerDirect[stocker_screener in-process]
   end
 
-  Browser --> Gloo --> API --> CoreDirect
+  Browser --> Gloo --> API
+  API --> CoreDirect
+  API --> ScreenerDirect
   Native --> CoreDirect
+  Native --> ScreenerDirect
 ```
 
 | Mode | Feature | Target | Backend connection | API required? |
 |------|---------|--------|-------------------|---------------|
-| **Web / API mode** | `web` (default) | `wasm32-unknown-unknown` | `GET {STOCKER_API_URL}/api/v1/symbols/{sym}/report` | Yes |
-| **Desktop / standalone** | `desktop` | Native OS binary | `stocker_core::build_research_report` | No |
+| **Web / API mode** | `web` (default) | `wasm32-unknown-unknown` | HTTP to `stocker-api` (research + screener) | Yes |
+| **Desktop / standalone** | `desktop` | Native OS binary | `stocker_core` + `stocker_screener` in-process | No |
 
-Central switch in [`frontend/src/api.rs`](../frontend/src/api.rs):
+Central switches:
 
-- **Web:** `gloo_net::Request::get` + JSON deserialize into `web_types::ResearchReport`
-- **Desktop:** `stocker_core::build_research_report(&symbol).await`
+- **Research:** [`frontend/src/api.rs`](../frontend/src/api.rs) — web: `gloo_net::Request::get`; desktop: `stocker_core::build_research_report`
+- **Screener:** [`frontend/src/screener_api.rs`](../frontend/src/screener_api.rs) — web: HTTP to `/api/v1/screener/*`; desktop: `ScreenerService` methods
 
-WASM cannot link `stocker-core` (no native HTTP stack on wasm32); standalone direct mode is **native desktop only**.
+WASM cannot link `stocker-core` or `stocker-screener` (no native HTTP/SQLite stack on wasm32); standalone direct mode is **native desktop only**.
 
 ### UI routes and tabs
 
-- Routes: [`frontend/src/routes.rs`](../frontend/src/routes.rs) — `/` (home), `/report/:symbol`
-- Report page: 8 tabs — Overview, Research, Financials, Sector, Peers, News, Management, Framework ([`frontend/src/report/tabs/`](../frontend/src/report/tabs/))
+- Routes: [`frontend/src/routes.rs`](../frontend/src/routes.rs) — `/` (home), `/report/:symbol`, `/screener`
+- Report page: **9 tabs** — Overview, Research, Financials, **Detailed Data** (SQLite metrics), Sector, Peers, News, Management, Framework ([`frontend/src/report/mod.rs`](../frontend/src/report/mod.rs))
+- Screener page: filter builder, results, saved screens, coverage tab, refresh/backfill button ([`frontend/src/screener/mod.rs`](../frontend/src/screener/mod.rs))
+
+---
+
+## Screener data flow
+
+```mermaid
+sequenceDiagram
+  participant User
+  participant UI as stocker-web or CLI
+  participant Svc as ScreenerService
+  participant Sched as RefreshScheduler
+  participant Fetch as stocker-core fetcher
+  participant DB as stocker.db
+  participant Yahoo as Yahoo Finance
+
+  User->>UI: Open /screener or run query
+  UI->>Svc: search / status / backfill
+  Svc->>DB: SQL query or read status
+
+  Note over Sched: Started by API boot or first screener page open (desktop)
+  Sched->>DB: Pick due symbol (tier 0 / tier 1)
+  Sched->>Fetch: Fetch Yahoo quoteSummary modules
+  Fetch->>Yahoo: HTTP
+  Yahoo-->>Fetch: JSON
+  Fetch-->>Sched: Parsed fields
+  Sched->>Svc: compute + upsert snapshot
+  Svc->>DB: UPDATE snapshots
+
+  User->>UI: Apply filters
+  UI->>Svc: ScreenQuery
+  Svc->>DB: SELECT with AND WHERE
+  DB-->>UI: ScreenRow list
+```
+
+### Screener user journey (UI)
+
+```mermaid
+flowchart TD
+  A[Open app] --> B[Home]
+  B --> C[Generate Report → /report/:symbol]
+  B --> D[Open Screener → /screener]
+  D --> E[Build filters AND]
+  E --> F[Run search]
+  F --> G[View results / save screen]
+  D --> H[Refresh stock data backfill]
+  H --> I{Already running?}
+  I -->|yes| J[Show message]
+  I -->|no| K[Background backfill]
+  C --> L[Detailed Data tab]
+  L --> M[All SQLite metrics for symbol]
+```
 
 ---
 
 ## Yahoo / yfinance data source
 
-**Clarification:** The project does not call the yfinance Python library. It calls Yahoo’s unofficial REST APIs directly (documented in README as “same endpoints Python yfinance uses”).
+**Clarification:** The project does not call the yfinance Python library. It calls Yahoo's unofficial REST APIs directly (documented in README as "same endpoints Python yfinance uses").
 
 ### Endpoints used
 
@@ -233,7 +351,7 @@ sequenceDiagram
   Report->>Analyze: stock, management, sector, peer, fundamental, valuation, technical, scoring
   Analyze-->>Report: analysis structs
   Report-->>UI: ResearchReport JSON
-  UI-->>User: 8-tab report UI or stdout
+  UI-->>User: 9-tab report UI or stdout
 ```
 
 ### Pipeline stages inside `build_research_report` ([`report.rs`](../crates/stocker-core/src/report.rs))
@@ -246,7 +364,7 @@ sequenceDiagram
 6. **Analyze**: stock, management, sector, peer, insights, structured sections, fundamentals, valuation, technical, entry signal, research rating, summary
 7. **Return** `ResearchReport` with ~20 top-level fields (symbol, price, financials, analyses, news, ratings, etc.)
 
-### User journey (UI)
+### User journey (research UI)
 
 ```mermaid
 flowchart TD
@@ -258,7 +376,7 @@ flowchart TD
   E -->|desktop| G[stocker_core in-process]
   F --> H[build_research_report]
   G --> H
-  H --> I[Render 8 analysis tabs]
+  H --> I[Render 9 analysis tabs incl. Detailed Data]
   I --> J[Back to Home]
 ```
 
@@ -266,9 +384,10 @@ flowchart TD
 
 ## Knowledge graph node index (for reference)
 
-**Components:** `stocker-core`, `stocker-api`, `stocker-cli`, `stocker-web`  
+**Components:** `stocker-core`, `stocker-screener`, `stocker-api`, `stocker-cli`, `stocker-web`  
 **Modes:** `web+HTTP`, `desktop-standalone`, `cli-headless`  
 **External:** `YahooFinance` (quoteSummary, chart, search, crumb)  
-**Key artifacts:** `ResearchReport`, `Financials`, `ChartHistory`, `PeerQuote`, `NewsItem`  
-**Key process:** `build_research_report`  
-**UI surfaces:** Home, Report (8 tabs)
+**Key artifacts:** `ResearchReport`, `Financials`, `ChartHistory`, `PeerQuote`, `NewsItem`, `ScreenRow`, `ScreenQuery`  
+**Key processes:** `build_research_report`, `RefreshScheduler`, `ScreenQuery`  
+**UI surfaces:** Home, Report (9 tabs), Screener (filters + coverage)  
+**Docs:** [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md), [README.md](../README.md)

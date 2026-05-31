@@ -4,9 +4,58 @@ Rust workspace that pulls NSE-oriented data from Yahoo Finance (same unofficial 
 
 - **HTTP API** (`stocker-api`, Axum)
 - **CLI** (`stocker-cli`)
-- **Web UI** (`stocker-web`, Dioxus): **API mode** (WASM + HTTP to the API) or **direct mode** (native desktop, calls `stocker-core` in-process; no API server)
+- **Web UI** (`stocker-web`, Dioxus): **API mode** (WASM + HTTP to the API) or **direct mode** (native desktop, calls `stocker-core` and `stocker-screener` in-process; no API server)
 
 This is not investment advice. Yahoo data can be incomplete or rate-limited.
+
+Further docs: [docs/KNOWLEDGE_BASE.md](docs/KNOWLEDGE_BASE.md) (run commands, env vars, troubleshooting), [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) (architecture).
+
+## Quick start: desktop app (research + screener)
+
+The desktop build is one native app — research reports and the NSE screener, no API server.
+
+1. Install Rust and Dioxus CLI (see [Prerequisites](#prerequisites)).
+2. From the repo root:
+
+```bash
+cd frontend
+dx serve --platform desktop
+```
+
+Without Dioxus CLI:
+
+```bash
+cargo run -p stocker-web --no-default-features --features desktop
+```
+
+3. In the app:
+   - **Generate Report** — enter a symbol (e.g. `RELIANCE`) on the home page
+   - **Open Screener** — filter ~110 metrics, save screens, refresh universe data
+
+The screener uses `stocker.db` in the repo root by default. Set `STOCKER_DB_PATH` to override. The refresh scheduler starts when you first open the screener.
+
+Release build: `.\build-standalone.ps1` (Windows) or `./build-standalone.sh` (Unix) → `target/release/stocker-web`.
+
+## Quick start: screener in the browser (WASM + API)
+
+1. **Terminal 1** — start the API (opens `stocker.db`, starts refresh scheduler):
+
+```bash
+cargo run -p stocker-api
+```
+
+2. **Terminal 2** — start the web UI:
+
+```bash
+cd frontend
+dx serve --port 8081
+```
+
+3. Open `http://127.0.0.1:8081` → click **Open Screener**.
+
+**Windows:** `.\run-dev.ps1` (or `run-dev.bat`) launches both terminals automatically.
+
+Headless alternative (no UI): `cargo run -p stocker-cli -- screener --query query.json` — see [Run the CLI](#run-the-cli).
 
 ## Layout
 
@@ -87,7 +136,7 @@ The screener stores ~110 metrics per NSE symbol in SQLite. The **symbol universe
 
 ### Server mode
 
-Start `stocker-api` (opens `stocker.db` in the repo root by default, starts the refresh scheduler):
+See [Quick start: screener in the browser](#quick-start-screener-in-the-browser-wasm--api). Start `stocker-api` (opens `stocker.db` in the repo root by default, starts the refresh scheduler):
 
 ```bash
 cargo run -p stocker-api
@@ -100,14 +149,17 @@ Screener HTTP API (same origin as research):
 | `GET /api/v1/screener/fields` | Metric catalog (labels, units, categories) |
 | `POST /api/v1/screener/search` | Body: `ScreenQuery`; returns matching rows |
 | `GET /api/v1/screener/status` | Universe size, pending refresh count, scheduler state |
+| `GET /api/v1/screener/coverage` | Per-metric fill rates |
 | `GET/POST/PUT/DELETE /api/v1/screener/screens` | Saved screens CRUD |
+| `GET /api/v1/screener/snapshot/{symbol}` | Full SQLite snapshot for one symbol |
 | `POST /api/v1/screener/refresh/{symbol}` | Force-refresh one symbol |
+| `POST /api/v1/screener/backfill` | Start universe backfill in background |
 
 In the web UI, open **Open Screener** from the home page (WASM build talks to the API).
 
 ### Standalone (desktop) mode
 
-The desktop build embeds `stocker-screener` in-process: it uses the same `stocker.db` as the API (repo root when you run from the project, or the nearest `stocker.db` found next to the executable / working directory). Set `STOCKER_DB_PATH` to override. The refresh scheduler starts when you first open the screener.
+See [Quick start: desktop app](#quick-start-desktop-app-research--screener). The desktop build embeds `stocker-screener` in-process: it uses the same `stocker.db` as the API (repo root when you run from the project, or the nearest `stocker.db` found next to the executable / working directory). Set `STOCKER_DB_PATH` to override. The refresh scheduler starts when you first open the screener.
 
 ```bash
 cargo run -p stocker-web --no-default-features --features desktop
@@ -151,14 +203,16 @@ Shareholding fields (FII/DII/promoter), industry PE/PBV, and all-time prices sin
 
 ## Web UI: API mode vs direct (standalone) mode
 
-`stocker-web` is one crate with two **mutually exclusive** Cargo features:
+`stocker-web` is one crate with two **mutually exclusive** Cargo features. Both modes include the **screener** (`/screener`) and **research report** (`/report/:symbol`) pages.
 
 | Feature | Target | How data is loaded |
 |---------|--------|---------------------|
-| **`web`** (default) | `wasm32-unknown-unknown` | Browser UI loads reports over **HTTP** from `stocker-api` (`GET /api/v1/symbols/{symbol}/report`). |
-| **`desktop`** | Native (Windows/macOS/Linux) | Same UI runs **in-process**: calls `stocker_core::build_research_report` directly. No API process required. |
+| **`web`** (default) | `wasm32-unknown-unknown` | Browser UI loads research + screener over **HTTP** from `stocker-api`. |
+| **`desktop`** | Native (Windows/macOS/Linux) | Same UI runs **in-process**: `stocker_core` + `stocker_screener`. No API process required. |
 
-Browser WASM cannot link `stocker-core` (networking stack is not built for WASM), so the standalone “direct” path is the **native desktop** build, not the same WASM binary.
+See [Quick start: desktop app](#quick-start-desktop-app-research--screener) and [Quick start: screener in the browser](#quick-start-screener-in-the-browser-wasm--api) for step-by-step commands.
+
+Browser WASM cannot link `stocker-core` or `stocker-screener` (networking/SQLite stack is not built for WASM), so the standalone “direct” path is the **native desktop** build, not the same WASM binary.
 
 ### API mode (WASM + HTTP)
 
