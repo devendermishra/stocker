@@ -264,7 +264,7 @@ pub fn build_fundamental_analysis(
     let de_screen = financials.debt_to_equity.max(d_eq);
     let bs_interp = if net_debt < 0.0 && cash > debt {
         "Net cash company: cash exceeds total debt on latest balance snapshot."
-    } else if de_screen > 150.0 || current_ratio.map(|c| c < 1.0).unwrap_or(false) {
+    } else if de_screen > 1.50 || current_ratio.map(|c| c < 1.0).unwrap_or(false) {
         "Risky balance sheet screen: high leverage or weak liquidity."
     } else if int_cov.map(|c| c < 2.0).unwrap_or(false) && interest > 0.0 {
         "Interest coverage is tight — monitor refinancing and EBITDA."

@@ -39,3 +39,45 @@ pub fn fmt_opt_num(v: Option<f64>) -> String {
     v.map(|x| format!("{:.2}", x))
         .unwrap_or_else(|| "N/A".to_string())
 }
+
+/// Format a screener snapshot value using catalog unit hints.
+pub fn fmt_screener_metric(value: Option<f64>, unit: &str) -> String {
+    let Some(v) = value else {
+        return "—".to_string();
+    };
+    if !v.is_finite() {
+        return "—".to_string();
+    }
+    match unit {
+        "Rupees" => fmt_price_in_currency(v, Some("INR")),
+        "RupeesCr" => fmt_money(v),
+        "Percent" => format!("{:.2}%", v),
+        "Ratio" => format!("{:.2}%", v * 100.0),
+        "Multiple" => format!("{:.2}", v),
+        "Count" => {
+            if v.abs() >= 1e7 {
+                format!("{:.2}Cr", v / 1e7)
+            } else if v.abs() >= 1e3 {
+                format!("{:.2}K", v / 1e3)
+            } else {
+                format!("{:.0}", v)
+            }
+        }
+        "Score" => format!("{:.2}", v),
+        "Days" => format!("{:.1} days", v),
+        _ => format!("{:.2}", v),
+    }
+}
+
+pub fn fmt_refreshed_at(ts: Option<i64>) -> String {
+    use chrono::TimeZone;
+
+    let Some(ts) = ts else {
+        return "Never".to_string();
+    };
+    chrono::Local
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}

@@ -61,6 +61,13 @@ pub struct Financials {
     pub regular_market_volume: f64,
     #[serde(default)]
     pub average_volume_10_day: f64,
+    #[serde(default)]
+    pub current_ratio: Option<f64>,
+    #[serde(default)]
+    pub quick_ratio: Option<f64>,
+    /// Par / face value per share when Yahoo reports it (often missing for NSE).
+    #[serde(default)]
+    pub face_value: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -336,6 +343,18 @@ pub struct IncomeStatementRow {
     pub gross_profit: f64,
     pub ebitda: f64,
     pub operating_income: f64,
+    /// EBIT when Yahoo exposes it separately from operating income.
+    #[serde(default)]
+    pub ebit: f64,
+    #[serde(default)]
+    pub pretax_income: f64,
+    #[serde(default)]
+    pub interest_expense: f64,
+    #[serde(default)]
+    pub income_tax_expense: f64,
+    /// Depreciation from FTS (`reconciledDepreciation` / income-statement depreciation lines).
+    #[serde(default)]
+    pub depreciation: f64,
     pub net_income: f64,
     pub diluted_eps: Option<f64>,
 }
@@ -354,6 +373,8 @@ pub struct BalanceSheetRow {
     pub interest_expense: f64,
     pub inventory: f64,
     pub net_receivables: f64,
+    #[serde(default)]
+    pub retained_earnings: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

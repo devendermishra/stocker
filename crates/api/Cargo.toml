@@ -10,9 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 stocker-core = { path = "../stocker-core" }
+stocker-screener = { path = "../stocker-screener" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 env_logger = "0.11"
 log = "0.4"
