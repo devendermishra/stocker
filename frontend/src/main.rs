@@ -11,6 +11,8 @@ mod api;
 mod app;
 mod components;
 mod format;
+mod portfolio;
+mod portfolio_api;
 mod report;
 mod routes;
 mod screener;

@@ -1,12 +1,12 @@
 use crate::types::ResearchReport;
 
-#[cfg(feature = "web")]
+#[cfg(any(feature = "web", feature = "desktop"))]
 pub const API_BASE: &str = match option_env!("STOCKER_API_URL") {
     Some(u) => u,
     None => "http://127.0.0.1:8080",
 };
 
-#[cfg(feature = "web")]
+#[cfg(all(feature = "web", not(feature = "desktop")))]
 pub async fn load_research_report(symbol: String) -> Result<ResearchReport, String> {
     let url = format!(
         "{}/api/v1/symbols/{}/report",
@@ -25,7 +25,7 @@ pub async fn load_research_report(symbol: String) -> Result<ResearchReport, Stri
     serde_json::from_str::<ResearchReport>(&text).map_err(|e| e.to_string())
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(feature = "web")))]
 pub async fn load_research_report(symbol: String) -> Result<ResearchReport, String> {
     stocker_core::build_research_report(&symbol, None, None)
         .await
