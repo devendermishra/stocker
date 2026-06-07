@@ -441,7 +441,7 @@ mod desktop_backend {
 
     static SERVICE: OnceCell<Arc<ScreenerService>> = OnceCell::const_new();
 
-    async fn service() -> Result<Arc<ScreenerService>, String> {
+    pub(super) async fn service() -> Result<Arc<ScreenerService>, String> {
         SERVICE
             .get_or_try_init(|| async {
                 let path = stocker_screener::db::default_db_path();
@@ -694,3 +694,9 @@ mod desktop_backend {
 
 #[cfg(feature = "desktop")]
 pub use desktop_backend::*;
+
+/// Shared screener instance for other desktop in-process backends (e.g. portfolio).
+#[cfg(all(feature = "desktop", not(feature = "web")))]
+pub async fn shared_screener() -> Result<std::sync::Arc<stocker_screener::ScreenerService>, String> {
+    desktop_backend::service().await
+}
