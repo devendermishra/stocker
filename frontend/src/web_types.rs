@@ -377,6 +377,92 @@ pub struct ResearchRating {
     pub technical_entry_label: String,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ActionGuidance {
+    pub if_holding: String,
+    pub if_considering_entry: String,
+    pub wait_for_events: Vec<String>,
+    pub headline: String,
+    pub rationale_bullets: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AuditChecklistItem {
+    pub metric: String,
+    pub value: Option<f64>,
+    pub value_display: String,
+    pub benchmark: String,
+    pub status: String,
+    pub note: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct FinancialStrengthAudit {
+    pub earnings_quality_score: f64,
+    pub balance_sheet_score: f64,
+    pub overall_strength_score: f64,
+    pub checklist: Vec<AuditChecklistItem>,
+    pub red_flags: Vec<String>,
+    pub strengths: Vec<String>,
+    pub interpretation: String,
+    pub confidence: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AnalystRecommendationPeriod {
+    pub period: String,
+    pub strong_buy: u32,
+    pub buy: u32,
+    pub hold: u32,
+    pub sell: u32,
+    pub strong_sell: u32,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AnalystRecommendations {
+    pub trend: Vec<AnalystRecommendationPeriod>,
+    pub net_bullish_score: i32,
+    pub consensus_label: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct InsiderTransaction {
+    pub filer_name: String,
+    pub transaction_text: String,
+    pub shares: f64,
+    pub value: Option<f64>,
+    pub start_date: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct InstitutionalHolder {
+    pub organization: String,
+    pub pct_held: f64,
+    pub position: f64,
+    pub value: f64,
+    pub report_date: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct MarketSignals {
+    pub analyst: AnalystRecommendations,
+    pub insider_transactions: Vec<InsiderTransaction>,
+    pub institutional_holders: Vec<InstitutionalHolder>,
+    pub narrative: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct BankingMetrics {
+    pub gnpa_pct: Option<f64>,
+    pub nnpa_pct: Option<f64>,
+    pub provision_coverage_ratio_pct: Option<f64>,
+    pub credit_growth_yoy_pct: Option<f64>,
+    pub deposit_growth_yoy_pct: Option<f64>,
+    pub casa_ratio_pct: Option<f64>,
+    pub as_of_date: Option<String>,
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ResearchSummary {
     pub business_quality: String,
@@ -389,6 +475,8 @@ pub struct ResearchSummary {
     pub key_negatives: Vec<String>,
     pub key_monitorables: Vec<String>,
     pub suggested_action: String,
+    #[serde(default)]
+    pub action_guidance: ActionGuidance,
     pub disclaimer: String,
 }
 
@@ -435,6 +523,12 @@ pub struct ResearchReport {
     pub technical_entry: TechnicalEntrySignal,
     pub research_rating: ResearchRating,
     pub research_summary: ResearchSummary,
+    #[serde(default)]
+    pub financial_strength_audit: FinancialStrengthAudit,
+    #[serde(default)]
+    pub market_signals: MarketSignals,
+    #[serde(default)]
+    pub bank_metrics: Option<BankingMetrics>,
 }
 
 #[allow(dead_code)]
@@ -449,6 +543,10 @@ pub struct CashFlowQuality {
     pub cfo_vs_ebitda_ratio: Option<f64>,
     pub cash_conversion_ratio: Option<f64>,
     pub capex_requirement_ratio: Option<f64>,
+    #[serde(default)]
+    pub cumulative_cfo_pat_3y: Option<f64>,
+    #[serde(default)]
+    pub cumulative_cfo_pat_5y: Option<f64>,
     pub narrative: String,
 }
 

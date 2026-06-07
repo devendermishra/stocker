@@ -92,7 +92,9 @@ See [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md) for full steps, env vars, and trouble
 | Module | Responsibility |
 |--------|----------------|
 | `fetcher.rs` | Yahoo HTTP, crumb auth, JSON parsing |
-| `symbol.rs` | `RELIANCE` → `RELIANCE.NS` |
+| `math.rs` | Shared `pct_change`, `cagr`, `median` (used by analysis + screener compute) |
+| `statements.rs` | Statement row sorting helpers (`income_annual_asc`, `annual_desc`, etc.) |
+| `symbol.rs` | `RELIANCE` → `RELIANCE.NS`, NSE CSV column detection (`nse_csv_indices`) |
 | `models.rs` | Serde types (`Financials`, `ResearchReport` inputs, etc.) |
 | `report.rs` | Orchestration: parallel fetch → analysis → `ResearchReport` |
 | `analysis.rs` | Stock, management, sector, peer heuristics |
@@ -110,7 +112,7 @@ See [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md) for full steps, env vars, and trouble
 | `db.rs` | SQLite pool, migrations, schema validation |
 | `metrics.rs` | Metric catalog (~110 fields, categories, units) |
 | `snapshot.rs` | Upsert symbol + metric rows from Yahoo fetch |
-| `compute.rs` | Derived / composite metrics |
+| `compute.rs` | Metric engine: `compute_all` delegates to section functions (`compute_price_metrics`, `compute_valuation_metrics`, …) via `ComputeContext` |
 | `query.rs` | `ScreenQuery` → SQL (AND filters, sort, limit) |
 | `refresh.rs` | Tiered scheduler, pacing, backfill |
 | `service.rs` | Public façade (`ScreenerService`) for API + desktop |
@@ -264,6 +266,7 @@ flowchart TD
 | `fetch_price` | `price` |
 | `fetch_financials` | `financialData,defaultKeyStatistics,summaryDetail,price` |
 | `fetch_shareholders` | `majorHoldersBreakdown,netSharePurchaseActivity` |
+| `fetch_market_signals` | `recommendationTrend,insiderTransactions,institutionOwnership` |
 | `fetch_annual_reports` | `incomeStatementHistory` |
 | `fetch_officer_pay` / profile | `assetProfile` |
 | `fetch_asset_profile` | `assetProfile,price` |

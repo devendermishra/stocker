@@ -5167,6 +5167,7 @@ name = "stocker-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "csv",
  "log",
  "reqwest",
  "serde",

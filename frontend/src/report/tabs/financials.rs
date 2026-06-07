@@ -42,5 +42,41 @@ pub fn financials_tab(r: &ResearchReport) -> Element {
                 p { style: "color:#273447;", "{note}" }
             }
         }
+        if !r.market_signals.institutional_holders.is_empty() {
+            section { style: "{card}; margin-top: 0.65rem;",
+                h3 { style: "margin-top:0;", "Institutional holders (Yahoo)" }
+                table { style: "width:100%; border-collapse: collapse; font-size: 0.88rem;",
+                    thead { tr { th { "Organization" } th { "% held" } th { "Value" } th { "Report date" } } }
+                    tbody {
+                        for h in &r.market_signals.institutional_holders {
+                            tr {
+                                td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "{h.organization}" }
+                                td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "{h.pct_held * 100.0:.2}%" }
+                                td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "{fmt_money(h.value)}" }
+                                td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "{h.report_date}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !r.market_signals.insider_transactions.is_empty() {
+            section { style: "{card}; margin-top: 0.65rem;",
+                h3 { style: "margin-top:0;", "Insider transactions (Yahoo)" }
+                table { style: "width:100%; border-collapse: collapse; font-size: 0.88rem;",
+                    thead { tr { th { "Filer" } th { "Transaction" } th { "Shares" } th { "Date" } } }
+                    tbody {
+                        for t in &r.market_signals.insider_transactions {
+                            tr {
+                                td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "{t.filer_name}" }
+                                td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "{t.transaction_text}" }
+                                td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "{t.shares:.0}" }
+                                td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "{t.start_date}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

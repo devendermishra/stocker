@@ -108,6 +108,36 @@ pub struct SavedScreensResponse {
     pub screens: Vec<SavedScreen>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SymbolListing {
+    pub symbol: String,
+    pub id: String,
+    pub short_name: Option<String>,
+    pub exchange: Option<String>,
+    pub sector: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SymbolPair {
+    pub symbol: String,
+    pub id: String,
+    pub nse_id: Option<String>,
+    pub bse_id: Option<String>,
+    pub short_name: Option<String>,
+    pub exchange: Option<String>,
+    pub sector: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolSearchResponse {
+    pub rows: Vec<SymbolListing>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolPairResponse {
+    pub listing: SymbolPair,
+}
+
 // =================== WEB BACKEND ===================
 
 #[cfg(feature = "web")]
@@ -286,6 +316,112 @@ pub async fn start_backfill() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "web")]
+pub async fn search_symbols(
+    search: &str,
+    exchange: Option<&str>,
+    limit: i64,
+) -> Result<Vec<SymbolListing>, String> {
+    let mut url = format!(
+        "{}/api/v1/screener/symbols?limit={}",
+        API_BASE,
+        limit
+    );
+    if !search.is_empty() {
+        url.push_str("&search=");
+        url.push_str(&urlencoding::encode(search));
+    }
+    if let Some(ex) = exchange.filter(|e| !e.is_empty() && !e.eq_ignore_ascii_case("all")) {
+        url.push_str("&exchange=");
+        url.push_str(&urlencoding::encode(ex));
+    }
+    let res = gloo_net::http::Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !(200..300).contains(&res.status()) {
+        return Err(format!("HTTP {}", res.status()));
+    }
+    let parsed: SymbolSearchResponse = res.json().await.map_err(|e| e.to_string())?;
+    Ok(parsed.rows)
+}
+
+#[cfg(feature = "web")]
+pub async fn symbol_pair(symbol: &str) -> Result<Option<SymbolPair>, String> {
+    let url = format!(
+        "{}/api/v1/screener/symbols/{}/pair",
+        API_BASE,
+        urlencoding::encode(symbol)
+    );
+    let res = gloo_net::http::Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if res.status() == 404 {
+        return Ok(None);
+    }
+    if !(200..300).contains(&res.status()) {
+        return Err(format!("HTTP {}", res.status()));
+    }
+    let parsed: SymbolPairResponse = res.json().await.map_err(|e| e.to_string())?;
+    Ok(Some(parsed.listing))
+}
+
+#[cfg(feature = "web")]
+pub async fn symbol_pair_from_id(id: &str, exchange: &str) -> Result<Option<SymbolPair>, String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let yahoo = if exchange.eq_ignore_ascii_case("BSE") {
+        format!("{}.BO", id.to_uppercase())
+    } else {
+        format!("{}.NS", id.to_uppercase())
+    };
+    symbol_pair(&yahoo).await
+}
+
+/// Build a Yahoo ticker from id + exchange, using pair lookup when available.
+#[cfg(feature = "web")]
+pub async fn resolve_report_ticker(id: &str, exchange: &str) -> String {
+    let id = id.trim();
+    if id.is_empty() {
+        return String::new();
+    }
+    let ex = exchange.trim().to_uppercase();
+    if let Ok(Some(pair)) = symbol_pair(id).await {
+        if ex == "BSE" {
+            if let Some(bse) = pair.bse_id {
+                return format!("{bse}.BO");
+            }
+        } else if let Some(nse) = pair.nse_id {
+            return format!("{nse}.NS");
+        }
+    }
+    if ex == "BSE" {
+        format!("{}.BO", id.to_uppercase())
+    } else {
+        format!("{}.NS", id.to_uppercase())
+    }
+}
+
+pub fn parse_base_id(symbol: &str) -> String {
+    let s = symbol.trim();
+    if s.ends_with(".NS") || s.ends_with(".BO") {
+        s.rsplit_once('.').map(|(base, _)| base.to_string()).unwrap_or_else(|| s.to_string())
+    } else {
+        s.to_string()
+    }
+}
+
+pub fn parse_exchange(symbol: &str) -> String {
+    if symbol.trim().ends_with(".BO") {
+        "BSE".to_string()
+    } else {
+        "NSE".to_string()
+    }
+}
+
 // =================== DESKTOP BACKEND ===================
 //
 // Direct in-process calls to `stocker_screener::ScreenerService`. The service is
@@ -300,7 +436,7 @@ mod desktop_backend {
 
     use super::{
         CatalogEntry, CoverageReport, CoverageSummary, CoverageTier, MetricCoverage, SavedScreen,
-        ScreenRow, ScreenerStatus,
+        ScreenRow, ScreenerStatus, SymbolListing, SymbolPair,
     };
 
     static SERVICE: OnceCell<Arc<ScreenerService>> = OnceCell::const_new();
@@ -480,6 +616,79 @@ mod desktop_backend {
     pub async fn refresh_symbol(symbol: &str) -> Result<(), String> {
         let svc = service().await?;
         svc.refresh_now(symbol).await.map_err(|e| e.to_string())
+    }
+
+    fn map_listing(r: stocker_screener::SymbolListing) -> SymbolListing {
+        SymbolListing {
+            symbol: r.symbol,
+            id: r.id,
+            short_name: r.short_name,
+            exchange: r.exchange,
+            sector: r.sector,
+        }
+    }
+
+    fn map_pair(r: stocker_screener::SymbolPair) -> SymbolPair {
+        SymbolPair {
+            symbol: r.symbol,
+            id: r.id,
+            nse_id: r.nse_id,
+            bse_id: r.bse_id,
+            short_name: r.short_name,
+            exchange: r.exchange,
+            sector: r.sector,
+        }
+    }
+
+    pub async fn search_symbols(
+        search: &str,
+        exchange: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SymbolListing>, String> {
+        let svc = service().await?;
+        let rows = svc
+            .search_symbols(search, exchange, limit)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows.into_iter().map(map_listing).collect())
+    }
+
+    pub async fn symbol_pair(symbol: &str) -> Result<Option<SymbolPair>, String> {
+        let svc = service().await?;
+        Ok(svc
+            .symbol_pair(symbol)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(map_pair))
+    }
+
+    pub async fn symbol_pair_from_id(id: &str, exchange: &str) -> Result<Option<SymbolPair>, String> {
+        let svc = service().await?;
+        Ok(svc
+            .symbol_pair_from_id(id, exchange)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(map_pair))
+    }
+
+    pub async fn resolve_report_ticker(id: &str, exchange: &str) -> String {
+        let id = id.trim();
+        if id.is_empty() {
+            return String::new();
+        }
+        if let Ok(svc) = service().await {
+            if let Ok(ticker) = svc.resolve_ticker(id, exchange).await {
+                if !ticker.is_empty() {
+                    return ticker;
+                }
+            }
+        }
+        let ex = exchange.trim().to_uppercase();
+        if ex == "BSE" {
+            format!("{}.BO", id.to_uppercase())
+        } else {
+            format!("{}.NS", id.to_uppercase())
+        }
     }
 }
 

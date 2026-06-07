@@ -86,17 +86,22 @@ impl ScreenerService {
         Ok(())
     }
 
+    /// Resolve a user symbol to a canonical Yahoo ticker (NSE preferred when dual-listed).
+    pub async fn resolve_symbol(&self, raw: &str) -> Result<String> {
+        let ctx = crate::universe::india_symbol_context_from_db(&self.pool).await?;
+        stocker_core::resolve_india_symbol(raw, &ctx).map_err(|e| Error::InvalidQuery(e.to_string()))
+    }
+
     /// Force a refresh of one symbol now (synchronously) — used by the CLI and
     /// integration tests.
     pub async fn refresh_now(&self, symbol: &str) -> Result<()> {
-        refresh::refresh_one(&self.pool, symbol).await
+        let symbol = self.resolve_symbol(symbol).await?;
+        refresh::refresh_one(&self.pool, &symbol).await
     }
 
-    /// Snapshot metrics for one symbol (normalized NSE ticker).
+    /// Snapshot metrics for one symbol (resolved Yahoo ticker).
     pub async fn snapshot_for(&self, symbol: &str) -> Result<Option<crate::query::ScreenRow>> {
-        let symbol = stocker_core::normalize_nse_symbol(symbol).map_err(|e| {
-            crate::error::Error::InvalidQuery(e.to_string())
-        })?;
+        let symbol = self.resolve_symbol(symbol).await?;
         crate::query::fetch_snapshot(&self.pool, &symbol).await
     }
 
@@ -139,6 +144,31 @@ impl ScreenerService {
 
     pub async fn delete_screen(&self, id: i64) -> Result<()> {
         screens::delete(&self.pool, id).await
+    }
+
+    pub async fn search_symbols(
+        &self,
+        search: &str,
+        exchange: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::symbols::SymbolListing>> {
+        crate::symbols::search_symbols(&self.pool, search, exchange, limit).await
+    }
+
+    pub async fn symbol_pair(&self, symbol: &str) -> Result<Option<crate::symbols::SymbolPair>> {
+        crate::symbols::symbol_pair(&self.pool, symbol).await
+    }
+
+    pub async fn symbol_pair_from_id(
+        &self,
+        id: &str,
+        exchange: &str,
+    ) -> Result<Option<crate::symbols::SymbolPair>> {
+        crate::symbols::symbol_pair_from_id(&self.pool, id, exchange).await
+    }
+
+    pub async fn resolve_ticker(&self, id: &str, exchange: &str) -> Result<String> {
+        crate::symbols::resolve_ticker(&self.pool, id, exchange).await
     }
 
     /// Underlying pool (for advanced uses like the CLI dump).

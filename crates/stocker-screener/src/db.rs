@@ -1,7 +1,9 @@
 //! SQLite pool + migrations + schema validation against the catalog.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
@@ -28,19 +30,37 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(30));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(opts)
         .await?;
 
+    prune_orphan_applied_migrations(&pool).await?;
     MIGRATOR.run(&pool).await?;
 
     validate_catalog().map_err(Error::Other)?;
     validate_schema(&pool).await?;
 
     Ok(pool)
+}
+
+/// Connect to an existing SQLite file without running migrations (maintenance only).
+pub async fn connect_without_migrate(path: &Path) -> Result<SqlitePool> {
+    let url = format!("sqlite://{}", path.display());
+    let opts = SqliteConnectOptions::from_str(&url)
+        .map_err(|e| Error::Other(format!("invalid sqlite url: {e}")))?
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(30));
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .map_err(Into::into)
 }
 
 /// Open an in-memory DB. Useful for tests.
@@ -57,6 +77,37 @@ pub async fn open_memory() -> Result<SqlitePool> {
     validate_catalog().map_err(Error::Other)?;
     validate_schema(&pool).await?;
     Ok(pool)
+}
+
+/// Drop `_sqlx_migrations` rows for SQL files that no longer exist (e.g. one-off
+/// repair migrations removed after they ran on existing databases).
+async fn prune_orphan_applied_migrations(pool: &SqlitePool) -> Result<()> {
+    let exists: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if exists.is_none() {
+        return Ok(());
+    }
+
+    let known: HashSet<i64> = MIGRATOR.migrations.iter().map(|m| m.version).collect();
+    let rows = sqlx::query("SELECT version FROM _sqlx_migrations")
+        .fetch_all(pool)
+        .await?;
+    for row in rows {
+        let version: i64 = row.try_get("version")?;
+        if !known.contains(&version) {
+            log::warn!(
+                "pruning orphan migration record version {version} (SQL file no longer present)"
+            );
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?")
+                .bind(version)
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Confirm that every catalog column exists on `snapshots`. Catches drift between

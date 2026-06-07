@@ -1,3 +1,4 @@
+use crate::math::cagr;
 use crate::models::{
     AnnualReport, CashFlowQuality, Financials, ManagementAnalysis, MonitorableItem, PeerAnalysis,
     PeerBenchmark, PeerComparisonRow, PeerQuote, ReportInsights, RiskBuckets, RiskCategory, RiskItem,
@@ -132,13 +133,6 @@ pub fn tone_from_summary(text: Option<&str>) -> (f64, String) {
         "Neutral"
     };
     (score, label.to_string())
-}
-
-fn cagr(start: f64, end: f64, years: f64) -> Option<f64> {
-    if years <= 0.0 || start <= 0.0 || end <= 0.0 {
-        return None;
-    }
-    Some(((end / start).powf(1.0 / years) - 1.0) * 100.0)
 }
 
 fn margin_trend_from_reports(reports: &[AnnualReport]) -> String {
@@ -622,7 +616,10 @@ fn clamp_score(v: f64, max: f64) -> f64 {
     v.max(0.0).min(max)
 }
 
-pub fn compute_cash_flow_quality(financials: &Financials) -> CashFlowQuality {
+pub fn compute_cash_flow_quality(
+    financials: &Financials,
+    bundle: Option<&crate::models::StatementBundle>,
+) -> CashFlowQuality {
     let pat = financials.net_income;
     let cfo = financials.operating_cashflow;
     let ebitda = financials.ebitda;
@@ -637,6 +634,15 @@ pub fn compute_cash_flow_quality(financials: &Financials) -> CashFlowQuality {
     let cash_conversion_ratio = if pat > 0.0 { Some(cfo / pat) } else { None };
     let capex_requirement_ratio = if cfo > 0.0 { Some(capex_estimate / cfo) } else { None };
 
+    let (cumulative_cfo_pat_3y, cumulative_cfo_pat_5y) = bundle
+        .map(|b| {
+            (
+                crate::financial_strength_audit::cumulative_cfo_pat_for_bundle(b, 3),
+                crate::financial_strength_audit::cumulative_cfo_pat_for_bundle(b, 5),
+            )
+        })
+        .unwrap_or((None, None));
+
     let mut narrative = String::new();
     if let Some(r) = cash_conversion_ratio {
         if r >= 1.0 {
@@ -644,6 +650,9 @@ pub fn compute_cash_flow_quality(financials: &Financials) -> CashFlowQuality {
         } else if r > 0.0 {
             narrative.push_str("CFO trails PAT (cash conversion < 1x). ");
         }
+    }
+    if let Some(r) = cumulative_cfo_pat_3y {
+        narrative.push_str(&format!("3Y cumulative CFO/PAT is {:.2}x. ", r));
     }
     if let Some(r) = cfo_vs_ebitda_ratio {
         narrative.push_str(&format!("CFO/EBITDA is {:.2}x. ", r));
@@ -665,6 +674,8 @@ pub fn compute_cash_flow_quality(financials: &Financials) -> CashFlowQuality {
         cfo_vs_ebitda_ratio,
         cash_conversion_ratio,
         capex_requirement_ratio,
+        cumulative_cfo_pat_3y,
+        cumulative_cfo_pat_5y,
         narrative,
     }
 }
@@ -784,6 +795,7 @@ pub fn categorize_risks(
     financials: &Financials,
     stock: &StockAnalysis,
     shareholders: &crate::models::Shareholders,
+    audit: Option<&crate::models::FinancialStrengthAudit>,
 ) -> RiskBuckets {
     let mut business_risks = vec![
         RiskItem { category: RiskCategory::Business, risk: "Demand slowdown".to_string(), severity: "Medium".to_string(), note: "Track volume growth and order trends quarterly.".to_string() },
@@ -802,6 +814,27 @@ pub fn categorize_risks(
     }
     if financials.free_cashflow <= 0.0 {
         financial_risks.push(RiskItem { category: RiskCategory::Financial, risk: "Poor cash flow".to_string(), severity: "High".to_string(), note: "Free cash flow is weak/negative on latest print.".to_string() });
+    }
+    if let Some(a) = audit {
+        for flag in a.red_flags.iter().take(4) {
+            financial_risks.push(RiskItem {
+                category: RiskCategory::Financial,
+                risk: flag.chars().take(60).collect(),
+                severity: "High".to_string(),
+                note: flag.clone(),
+            });
+        }
+        if a.earnings_quality_score < 40.0 {
+            financial_risks.push(RiskItem {
+                category: RiskCategory::Financial,
+                risk: "Earnings quality audit failed".to_string(),
+                severity: "High".to_string(),
+                note: format!(
+                    "Earnings quality score {:.0}/100 — CFO/PAT and working capital checks weak.",
+                    a.earnings_quality_score
+                ),
+            });
+        }
     }
 
     let mut management_risks = vec![
@@ -921,9 +954,11 @@ pub fn build_structured_sections(
     subject: &PeerQuote,
     peers: &[PeerQuote],
     shareholders: &crate::models::Shareholders,
+    bundle: &crate::models::StatementBundle,
+    audit: &crate::models::FinancialStrengthAudit,
 ) -> (StructuredResearchSections, ScoreBreakdown) {
-    let cash_flow_quality = compute_cash_flow_quality(financials);
-    let risks = categorize_risks(financials, stock, shareholders);
+    let cash_flow_quality = compute_cash_flow_quality(financials, Some(bundle));
+    let risks = categorize_risks(financials, stock, shareholders, Some(audit));
     let score = compute_weighted_score(financials, stock, management, &risks);
     let company = long_name.unwrap_or(symbol);
     let scenario_analysis = ScenarioAnalysis {
@@ -939,7 +974,7 @@ pub fn build_structured_sections(
         competitive_advantage: "Assess moat via switching costs, brand strength, cost edge, and execution consistency.".to_string(),
         management_quality: management.narrative.clone(),
         financial_performance: stock.narrative.clone(),
-        balance_sheet_strength: format!("Debt/equity {:.2}, total debt {:.2}, market cap {:.2}.", financials.debt_to_equity, financials.total_debt, financials.market_cap),
+        balance_sheet_strength: audit.interpretation.clone(),
         cash_flow_quality,
         valuation: stock.valuation_label.clone(),
         peer_comparison: build_peer_comparison_table(subject, peers),

@@ -1,6 +1,7 @@
 use crate::models::{
-    Financials, FundamentalAnalysis, PeerQuote, ResearchRating, RiskBuckets, ScoreExplanation,
-    Shareholders, TechnicalAnalysis, TechnicalEntrySignal, ValuationAnalysis,
+    Financials, FinancialStrengthAudit, FundamentalAnalysis, MarketSignals, PeerQuote, ResearchRating,
+    RiskBuckets, ScoreExplanation, Shareholders, TechnicalAnalysis, TechnicalEntrySignal,
+    ValuationAnalysis,
 };
 
 fn clamp01(x: f64) -> f64 {
@@ -16,6 +17,8 @@ pub fn build_research_rating(
     peers: &[PeerQuote],
     shareholders: &Shareholders,
     risk_buckets: &RiskBuckets,
+    audit: &FinancialStrengthAudit,
+    market: &MarketSignals,
 ) -> ResearchRating {
     let w = (0.20_f64, 0.25_f64, 0.25_f64, 0.15_f64, 0.15_f64);
     let mut explain = Vec::new();
@@ -50,8 +53,9 @@ pub fn build_research_rating(
     }
     growth = clamp01(growth);
 
-    // Quality 0-100
-    let mut quality = 45.0_f64;
+    // Quality 0-100 — blend heuristic fundamentals with financial strength audit.
+    // For banks, audit already uses GNPA/NNPA/PCR; CFO/PAT-style metrics are not used.
+    let mut quality = audit.overall_strength_score * 0.40 + 27.0;
     let roe = financials.return_on_equity * 100.0;
     if roe > 18.0 {
         quality += 18.0;
@@ -72,8 +76,43 @@ pub fn build_research_rating(
     }
     if fundamental.balance_sheet.interpretation.contains("Net cash") {
         quality += 10.0;
-    } else if fundamental.balance_sheet.interpretation.contains("Risky") {
+    } else     if fundamental.balance_sheet.interpretation.contains("Risky") {
         quality -= 15.0;
+    }
+    if audit.earnings_quality_score < 40.0 {
+        quality -= 15.0;
+    } else if audit.checklist.iter().any(|i| {
+        i.metric.contains("Cumulative CFO / PAT (3Y)") && i.value.map(|v| v >= 1.0).unwrap_or(false)
+    }) {
+        quality += 12.0;
+    }
+    if audit.balance_sheet_score < 40.0 {
+        quality -= 12.0;
+    }
+    if audit
+        .checklist
+        .iter()
+        .any(|i| i.metric == "Interest coverage" && i.value.map(|v| v < 2.0).unwrap_or(false))
+    {
+        quality -= 10.0;
+    }
+    if financials
+        .return_on_capital_employed
+        .map(|r| r * 100.0 > 18.0)
+        .unwrap_or(false)
+    {
+        quality += 8.0;
+    }
+    if market.analyst.net_bullish_score > 3 {
+        quality += 4.0;
+    } else if market.analyst.net_bullish_score < -3 {
+        quality -= 4.0;
+    }
+    let insider_net: f64 = market.insider_transactions.iter().map(|t| t.shares).sum();
+    if insider_net > 0.0 {
+        quality += 3.0;
+    } else if insider_net < 0.0 {
+        quality -= 3.0;
     }
     quality = clamp01(quality);
 

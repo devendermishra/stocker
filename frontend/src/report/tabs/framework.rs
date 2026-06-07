@@ -27,8 +27,10 @@ pub fn framework_tab(r: &ResearchReport) -> Element {
             KeyValue { label: "4. Competitive Advantage", value: r.structured_sections.competitive_advantage.clone() }
             KeyValue { label: "5. Management Quality", value: r.structured_sections.management_quality.clone() }
             KeyValue { label: "6. Financial Performance", value: r.structured_sections.financial_performance.clone() }
-            KeyValue { label: "7. Balance Sheet Strength", value: r.structured_sections.balance_sheet_strength.clone() }
+            KeyValue { label: "7. Balance Sheet Strength", value: r.financial_strength_audit.interpretation.clone() }
             KeyValue { label: "8. Cash Flow Quality", value: r.structured_sections.cash_flow_quality.narrative.clone() }
+            KeyValue { label: "8b. Earnings quality score", value: format!("{:.0}/100", r.financial_strength_audit.earnings_quality_score) }
+            KeyValue { label: "8c. Balance sheet score", value: format!("{:.0}/100", r.financial_strength_audit.balance_sheet_score) }
             KeyValue { label: "9. Valuation", value: r.structured_sections.valuation.clone() }
             KeyValue { label: "11. Growth Triggers", value: r.structured_sections.growth_triggers.join(", ") }
             KeyValue { label: "14. Entry/Exit Strategy", value: r.structured_sections.entry_exit_strategy.clone() }
@@ -73,6 +75,22 @@ pub fn framework_tab(r: &ResearchReport) -> Element {
             p { "Upside: {r.structured_sections.scenario_analysis.upside_case}" }
             p { "Downside: {r.structured_sections.scenario_analysis.downside_case}" }
             p { style: "font-weight:600;", "{r.structured_sections.scenario_analysis.capital_impairment_guardrail}" }
+        }
+        section { style: "{card}; margin-top: 0.65rem;",
+            h3 { style: "margin-top:0;", "Financial Strength Checklist" }
+            table { style: "width:100%; border-collapse: collapse; font-size: 0.88rem;",
+                thead { tr { th { "Metric" } th { "Value" } th { "Benchmark" } th { "Status" } } }
+                tbody {
+                    for item in &r.financial_strength_audit.checklist {
+                        tr {
+                            td { style: "padding:0.3rem 0; border-top:1px solid #eceff5;", "{item.metric}" }
+                            td { style: "padding:0.3rem 0; border-top:1px solid #eceff5;", "{item.value_display}" }
+                            td { style: "padding:0.3rem 0; border-top:1px solid #eceff5;", "{item.benchmark}" }
+                            td { style: "padding:0.3rem 0; border-top:1px solid #eceff5;", "{item.status}" }
+                        }
+                    }
+                }
+            }
         }
         section { style: "{card}; margin-top: 0.65rem;",
             h3 { style: "margin-top:0;", "15. Key Monitorables" }

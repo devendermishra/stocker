@@ -61,8 +61,8 @@ Headless alternative (no UI): `cargo run -p stocker-cli -- screener --query quer
 
 | Path | Role |
 |------|------|
-| `crates/stocker-core` | Fetch, models, analysis, `build_research_report` |
-| `crates/stocker-screener` | NSE screener: SQLite snapshots, metric catalog, refresh job, AND filters |
+| `crates/stocker-core` | Fetch, models, analysis, shared `math` / `statements` helpers, `build_research_report` |
+| `crates/stocker-screener` | NSE screener: SQLite snapshots, sectioned `compute_all` metric engine, refresh job, AND filters |
 | `crates/api` | Axum server (research + screener routes) |
 | `crates/cli` | Research report JSON + screener queries |
 | `frontend` | Dioxus SPA (research + screener UI) |
@@ -177,23 +177,43 @@ No API server required for screener or research in this mode.
 | `SCREENER_PACING_MS` | `800` | Delay between Yahoo fetches per symbol |
 | `SCREENER_BURST_PAUSE_EVERY_N` | `50` | Extra pause after every N symbols |
 | `SCREENER_BURST_PAUSE_MS` | `15000` | Length of burst pause (ms) |
-| `STOCKER_UNIVERSE_CSV` | *(unset)* | Path to your local universe CSV (required for full-market auto re-sync) |
-| `SCREENER_UNIVERSE_SYNC_INTERVAL_SECS` | `86400` | Re-load `STOCKER_UNIVERSE_CSV` when set (local file only; no NSE network) |
+| `STOCKER_UNIVERSE_CSV` | *(unset)* | Path to your local NSE universe CSV (required for full-market auto re-sync) |
+| `STOCKER_BSE_UNIVERSE_CSV` | *(unset)* | Path to your local BSE universe CSV (List of Securities export) |
+| `SCREENER_UNIVERSE_SYNC_INTERVAL_SECS` | `86400` | Re-load universe CSVs when set (local files only; no exchange network) |
 
 ### Universe CSV (compliance)
 
-Stocker **does not scrape or call NSE/BSE exchange APIs**. Symbol lists must be **local CSV files** you download yourself (e.g. NSE “Securities available for trading” → `EQUITY_L.csv`). Live quotes and fundamentals come from **Yahoo Finance only**; outbound HTTP in `stocker-core` is enforced by an allowlist (`http_policy.rs`).
+Stocker **does not scrape or call NSE/BSE exchange APIs**. Symbol lists must be **local CSV files** you download yourself:
+
+- **NSE:** “Securities available for trading” → `EQUITY_L.csv`
+- **BSE:** [List of Securities](https://www.bseindia.com/corporates/List_Scrips.html) → Equity, Active → download export → `EQUITY_L_BSE.csv`
+
+Live quotes and fundamentals come from **Yahoo Finance only** (`*.NS` for NSE, `*.BO` for BSE). Dual-listed stocks are deduplicated by ISIN with **NSE price priority** — if a stock is on both exchanges, only the NSE ticker (`SYMBOL.NS`) is kept. Outbound HTTP in `stocker-core` is enforced by an allowlist (`http_policy.rs`).
 
 ```bash
-# One-time or after you refresh the file on disk
+# NSE + BSE universe sync
 set STOCKER_UNIVERSE_CSV=D:\data\EQUITY_L.csv
+set STOCKER_BSE_UNIVERSE_CSV=D:\data\EQUITY_L_BSE.csv
 cargo run -p stocker-cli -- universe
 
 # Or per run
-cargo run -p stocker-cli -- universe --csv D:\data\EQUITY_L.csv
+cargo run -p stocker-cli -- universe --csv D:\data\EQUITY_L.csv --bse-csv D:\data\EQUITY_L_BSE.csv
+
+# Research report: BSE-only stock uses .BO; dual-listed resolves to .NS
+cargo run -p stocker-cli -- report SOMEBSEONLY
+cargo run -p stocker-cli -- report RELIANCE.BO
 ```
 
-Supported CSV shapes: NSE `EQUITY_L.csv` (`SYMBOL`, optional `SERIES=EQ`), or a single `symbol` column (see bundled `crates/stocker-screener/data/nifty500.csv`). Without a CSV, only the bundled **NIFTY 500** list (~508 names) is used.
+Default paths if env vars are unset: `data/EQUITY_L.csv` and `data/EQUITY_L_BSE.csv`.
+
+Supported CSV shapes:
+
+- NSE `EQUITY_L.csv` (`SYMBOL`, optional `SERIES=EQ`, `ISIN NUMBER`)
+- BSE List of Securities (`Security Id`, `ISIN No`, `Status=Active`)
+- Combined file with an `EXCHANGE` column (`NSE` / `BSE`)
+- Simple single-column list (see bundled `crates/stocker-screener/data/nifty500.csv`)
+
+Without a CSV, only the bundled **NIFTY 500** list (~508 NSE names) is used.
 
 ### Metric catalog
 

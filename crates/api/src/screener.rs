@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use stocker_screener::{
     Error as ScreenerError, MetricSpec, NewSavedScreen, RefreshConfig, ScreenQuery, ScreenerService,
 };
@@ -33,6 +33,8 @@ pub fn router(service: Arc<ScreenerService>) -> Router {
             get(get_screen).delete(delete_screen).put(update_screen),
         )
         .route("/api/v1/screener/snapshot/{symbol}", get(get_snapshot))
+        .route("/api/v1/screener/symbols", get(search_symbols))
+        .route("/api/v1/screener/symbols/{symbol}/pair", get(get_symbol_pair))
         .route("/api/v1/screener/refresh/{symbol}", post(refresh_now))
         .route("/api/v1/screener/recompute", post(recompute_composites))
         .route("/api/v1/screener/scheduler/stop", post(stop_scheduler))
@@ -74,49 +76,58 @@ async fn list_fields(State(s): State<ScreenerState>) -> impl IntoResponse {
     Json(serde_json::json!({ "fields": entries }))
 }
 
-async fn search(State(s): State<ScreenerState>, Json(q): Json<ScreenQuery>) -> impl IntoResponse {
-    match s.service.run_query(&q).await {
-        Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "rows": rows }))).into_response(),
-        Err(e) => screener_error_response(e),
-    }
-}
-
-async fn status(State(s): State<ScreenerState>) -> impl IntoResponse {
-    match s.service.status().await {
-        Ok(s) => (StatusCode::OK, Json(s)).into_response(),
-        Err(e) => screener_error_response(e),
-    }
-}
-
-async fn coverage(State(s): State<ScreenerState>) -> impl IntoResponse {
-    match s.service.coverage().await {
-        Ok(r) => (StatusCode::OK, Json(r)).into_response(),
-        Err(e) => screener_error_response(e),
-    }
-}
-
-async fn list_screens(State(s): State<ScreenerState>) -> impl IntoResponse {
-    match s.service.list_screens().await {
-        Ok(v) => (StatusCode::OK, Json(serde_json::json!({ "screens": v }))).into_response(),
-        Err(e) => screener_error_response(e),
-    }
-}
-
-async fn get_screen(State(s): State<ScreenerState>, Path(id): Path<i64>) -> impl IntoResponse {
-    match s.service.get_screen(id).await {
+fn screener_json<T: Serialize>(result: Result<T, ScreenerError>) -> axum::response::Response {
+    match result {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => screener_error_response(e),
     }
+}
+
+fn screener_json_status<T: Serialize>(
+    result: Result<T, ScreenerError>,
+    status: StatusCode,
+) -> axum::response::Response {
+    match result {
+        Ok(v) => (status, Json(v)).into_response(),
+        Err(e) => screener_error_response(e),
+    }
+}
+
+async fn search(State(s): State<ScreenerState>, Json(q): Json<ScreenQuery>) -> impl IntoResponse {
+    screener_json(
+        s.service
+            .run_query(&q)
+            .await
+            .map(|rows| serde_json::json!({ "rows": rows })),
+    )
+}
+
+async fn status(State(s): State<ScreenerState>) -> impl IntoResponse {
+    screener_json(s.service.status().await)
+}
+
+async fn coverage(State(s): State<ScreenerState>) -> impl IntoResponse {
+    screener_json(s.service.coverage().await)
+}
+
+async fn list_screens(State(s): State<ScreenerState>) -> impl IntoResponse {
+    screener_json(
+        s.service
+            .list_screens()
+            .await
+            .map(|screens| serde_json::json!({ "screens": screens })),
+    )
+}
+
+async fn get_screen(State(s): State<ScreenerState>, Path(id): Path<i64>) -> impl IntoResponse {
+    screener_json(s.service.get_screen(id).await)
 }
 
 async fn create_screen(
     State(s): State<ScreenerState>,
     Json(new): Json<NewSavedScreen>,
 ) -> impl IntoResponse {
-    match s.service.create_screen(&new).await {
-        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
-        Err(e) => screener_error_response(e),
-    }
+    screener_json_status(s.service.create_screen(&new).await, StatusCode::CREATED)
 }
 
 async fn update_screen(
@@ -124,10 +135,7 @@ async fn update_screen(
     Path(id): Path<i64>,
     Json(new): Json<NewSavedScreen>,
 ) -> impl IntoResponse {
-    match s.service.update_screen(id, &new).await {
-        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-        Err(e) => screener_error_response(e),
-    }
+    screener_json(s.service.update_screen(id, &new).await)
 }
 
 async fn delete_screen(State(s): State<ScreenerState>, Path(id): Path<i64>) -> impl IntoResponse {
@@ -152,13 +160,60 @@ async fn get_snapshot(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct SymbolSearchQuery {
+    search: Option<String>,
+    exchange: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn search_symbols(
+    State(s): State<ScreenerState>,
+    Query(q): Query<SymbolSearchQuery>,
+) -> impl IntoResponse {
+    let search = q.search.unwrap_or_default();
+    let limit = q.limit.unwrap_or(50);
+    screener_json(
+        s.service
+            .search_symbols(&search, q.exchange.as_deref(), limit)
+            .await
+            .map(|rows| serde_json::json!({ "rows": rows })),
+    )
+}
+
+async fn get_symbol_pair(
+    State(s): State<ScreenerState>,
+    Path(symbol): Path<String>,
+) -> impl IntoResponse {
+    match s.service.symbol_pair(&symbol).await {
+        Ok(Some(listing)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "listing": listing })),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "symbol not found" })),
+        )
+            .into_response(),
+        Err(e) => screener_error_response(e),
+    }
+}
+
 async fn refresh_now(
     State(s): State<ScreenerState>,
     Path(symbol): Path<String>,
 ) -> impl IntoResponse {
-    let symbol = stocker_core::normalize_nse_symbol(&symbol).unwrap_or(symbol);
+    let resolved = match s.service.resolve_symbol(&symbol).await {
+        Ok(sym) => sym,
+        Err(e) => return screener_error_response(e),
+    };
     match s.service.refresh_now(&symbol).await {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "symbol": symbol }))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "symbol": resolved })),
+        )
+            .into_response(),
         Err(e) => screener_error_response(e),
     }
 }
@@ -190,14 +245,11 @@ async fn start_backfill(State(s): State<ScreenerState>) -> impl IntoResponse {
 }
 
 async fn recompute_composites(State(s): State<ScreenerState>) -> impl IntoResponse {
-    match s.service.recompute_composites().await {
-        Ok(stats) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "rows_touched": stats.rows_touched })),
-        )
-            .into_response(),
-        Err(e) => screener_error_response(e),
-    }
+    screener_json(
+        s.service.recompute_composites().await.map(|stats| {
+            serde_json::json!({ "ok": true, "rows_touched": stats.rows_touched })
+        }),
+    )
 }
 
 fn screener_error_response(e: ScreenerError) -> axum::response::Response {

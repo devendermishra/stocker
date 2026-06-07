@@ -255,7 +255,7 @@ async fn sync_universe_if_due(pool: &SqlitePool, cfg: &RefreshConfig) -> Result<
     if now - last < cfg.universe_sync_interval_secs {
         return Ok(());
     }
-    let discovered = universe::discover_universe(None).await;
+    let discovered = universe::discover_universe_all(None, None).await;
     let n = universe::sync_universe(pool, &discovered).await?;
     universe::record_sync(pool, now).await?;
     log::info!("screener universe synced; {} symbols upserted", n);
@@ -294,7 +294,7 @@ pub async fn refresh_one(pool: &SqlitePool, symbol: &str) -> Result<()> {
     let snap = StockSnapshot::new(symbol.to_string(), metrics);
     snap.upsert(pool).await?;
 
-    // Refresh identity fields (sector / industry / short name) opportunistically.
+    // Identity from Yahoo profile (exchange is already NSE/BSE — see fetch_asset_profile).
     SymbolRow {
         symbol: symbol.to_string(),
         short_name: profile.long_name.clone(),
@@ -308,6 +308,7 @@ pub async fn refresh_one(pool: &SqlitePool, symbol: &str) -> Result<()> {
     }
     .upsert_identity(pool)
     .await?;
+
     Ok(())
 }
 

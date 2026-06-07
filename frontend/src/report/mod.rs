@@ -7,7 +7,10 @@ use dioxus::prelude::*;
 use crate::api::load_research_report;
 use crate::format::fmt_price_in_currency;
 use crate::routes::Route;
-use crate::screener_api::{list_fields, load_snapshot, refresh_symbol, CatalogEntry, ScreenRow};
+use crate::screener_api::{
+    list_fields, load_snapshot, parse_base_id, parse_exchange, refresh_symbol, resolve_report_ticker,
+    CatalogEntry, ScreenRow,
+};
 
 use tabs::{
     company_news_tab, financials_tab, framework_tab, management_tab, overview_tab, peers_tab,
@@ -23,6 +26,10 @@ pub fn Report(symbol: String) -> Element {
     let sym_arc = Arc::new(symbol);
     let heading = sym_arc.as_ref().clone();
 
+    let mut stock_id = use_signal(|| parse_base_id(&heading));
+    let mut selected_exchange = use_signal(|| parse_exchange(&heading));
+    let mut load_ticker = use_signal(|| None::<String>);
+
     let catalog_res = use_resource(|| async { list_fields().await });
     let mut metrics_reload = use_signal(|| 0u32);
     let mut metrics_refreshing = use_signal(|| false);
@@ -30,6 +37,22 @@ pub fn Report(symbol: String) -> Element {
 
     let sym_metrics = sym_arc.clone();
     let sym_report = sym_arc.clone();
+
+    let sym_sync = sym_arc.clone();
+    use_effect(move || {
+        let sym = sym_sync.as_ref().clone();
+        stock_id.set(parse_base_id(&sym));
+        selected_exchange.set(parse_exchange(&sym));
+    });
+
+    use_effect(move || {
+        let sid = stock_id();
+        let ex = selected_exchange();
+        spawn(async move {
+            let ticker = resolve_report_ticker(&sid, &ex).await;
+            load_ticker.set(if ticker.is_empty() { None } else { Some(ticker) });
+        });
+    });
 
     let metrics_res = use_resource(move || {
         let sym = sym_metrics.as_ref().clone();
@@ -46,8 +69,59 @@ pub fn Report(symbol: String) -> Element {
         document::Link { rel: "stylesheet", href: "https://cdn.jsdelivr.net/npm/modern-normalize@2/modern-normalize.min.css" }
         div {
             style: "font-family: Inter, system-ui, sans-serif; max-width: 1060px; margin: 1.5rem auto; padding: 0 1rem 2rem;",
-            Link { to: Route::Home {}, style: "color: #184ad8;", "← Home" }
-            h1 { style: "margin: 0.8rem 0 0.4rem;", "Research Report: {heading}" }
+            Link {
+                to: Route::Home { id: String::new(), exchange: String::new() },
+                style: "color: #184ad8;",
+                "← Home"
+            }
+            h1 { style: "margin: 0.8rem 0 0.4rem;", "Research Report" }
+
+            div {
+                style: "{CARD} margin: 0.75rem 0 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end;",
+                label {
+                    style: "display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.9rem; font-weight: 600; color: #333; flex: 1; min-width: 180px;",
+                    "Id"
+                    input {
+                        style: "padding: 0.55rem 0.75rem; border: 1px solid #d5dbe3; border-radius: 8px; font-weight: 400;",
+                        placeholder: "RELIANCE",
+                        value: "{stock_id}",
+                        oninput: move |e| stock_id.set(e.value()),
+                    }
+                }
+                label {
+                    style: "display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.9rem; font-weight: 600; color: #333;",
+                    "Exchange"
+                    select {
+                        style: "padding: 0.55rem 0.75rem; border: 1px solid #d5dbe3; border-radius: 8px; font-weight: 400; min-width: 100px;",
+                        value: "{selected_exchange}",
+                        onchange: move |e| selected_exchange.set(e.value()),
+                        option { value: "NSE", "NSE" }
+                        option { value: "BSE", "BSE" }
+                    }
+                }
+                if let Some(sym) = load_ticker() {
+                    if sym != heading {
+                        Link {
+                            to: Route::Report { symbol: sym },
+                            style: "padding: 0.55rem 1rem; background: #184ad8; color: white; border-radius: 8px; text-decoration: none; font-weight: 600;",
+                            "Load"
+                        }
+                    } else {
+                        span {
+                            style: "padding: 0.55rem 1rem; background: #aab4c4; color: white; border-radius: 8px; font-weight: 600;",
+                            "Load"
+                        }
+                    }
+                } else {
+                    span {
+                        style: "padding: 0.55rem 1rem; background: #aab4c4; color: white; border-radius: 8px; font-weight: 600;",
+                        "Load"
+                    }
+                }
+            }
+
+            p { style: "color: #666; font-size: 0.9rem; margin: 0 0 0.75rem;", "Showing: {heading}" }
+
             match &*resource.read() {
                 None => rsx! { p { "Loading..." } },
                 Some(Err(e)) => rsx! { p { style: "color: #b00020;", "{e}" } },

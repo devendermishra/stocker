@@ -1,7 +1,9 @@
 use crate::models::{
-    AssetProfile, CompanyOverview, Financials, FundamentalAnalysis, ResearchRating, ResearchSummary,
-    RiskBuckets, StatementBundle, TechnicalAnalysis, TechnicalEntrySignal, ValuationAnalysis,
+    AssetProfile, CompanyOverview, Financials, FinancialStrengthAudit,
+    FundamentalAnalysis, MarketSignals, ResearchRating, ResearchSummary, RiskBuckets,
+    StatementBundle, TechnicalAnalysis, TechnicalEntrySignal, ValuationAnalysis,
 };
+use crate::financial_strength_audit::build_action_guidance;
 
 fn summarize_risks(risks: &RiskBuckets) -> String {
     let mut parts = Vec::new();
@@ -48,7 +50,7 @@ pub fn build_company_overview(
             .long_name
             .clone()
             .unwrap_or_else(|| symbol.to_string()),
-        ticker: symbol.trim_end_matches(".NS").to_string(),
+        ticker: crate::symbol::india_display_ticker(symbol),
         exchange: profile.exchange.clone(),
         sector: profile.sector.clone(),
         industry: profile.industry.clone(),
@@ -70,6 +72,8 @@ pub fn build_research_summary(
     entry: &TechnicalEntrySignal,
     rating: &ResearchRating,
     risks: &RiskBuckets,
+    audit: &FinancialStrengthAudit,
+    market: &MarketSignals,
 ) -> ResearchSummary {
     let business_quality = fundamental.profitability.interpretation.clone();
     let growth = fundamental.growth.interpretation.clone();
@@ -83,16 +87,12 @@ pub fn build_research_summary(
     );
     let key_risks = summarize_risks(risks);
 
-    let final_view = format!(
-        "Overall score {:.0}/100 — {}. Fundamental valuation: {}. Technical entry: {}. {} This is research support only, not a recommendation.",
-        rating.overall_score,
-        rating.rating_label,
-        rating.cheap_fair_expensive_fundamental,
-        rating.technical_entry_label,
-        entry.fundamental_vs_technical
-    );
+    let action_guidance = build_action_guidance(audit, rating, valuation, market);
 
     let mut positives = Vec::new();
+    for s in audit.strengths.iter().take(2) {
+        positives.push(s.clone());
+    }
     if fundamental.profitability.interpretation.contains("High-quality") {
         positives.push("Solid profitability vs heuristic thresholds.".to_string());
     }
@@ -108,6 +108,9 @@ pub fn build_research_summary(
     positives.truncate(3);
 
     let mut negatives = Vec::new();
+    for f in audit.red_flags.iter().take(2) {
+        negatives.push(f.clone());
+    }
     if fundamental.balance_sheet.interpretation.contains("Risky") {
         negatives.push("Balance sheet / liquidity screen is tight.".to_string());
     }
@@ -122,31 +125,31 @@ pub fn build_research_summary(
     }
     negatives.truncate(3);
 
-    let monitors = vec![
-        "Revenue and margin trajectory vs guidance.".to_string(),
-        "Debt, refinancing, and interest coverage.".to_string(),
-        "Free cash flow vs capex and working capital.".to_string(),
-    ];
+    let mut monitors = action_guidance.wait_for_events.clone();
+    if monitors.len() < 3 {
+        monitors.push("Revenue and margin trajectory vs guidance.".to_string());
+        monitors.push("Debt, refinancing, and interest coverage.".to_string());
+        monitors.push("Free cash flow vs capex and working capital.".to_string());
+    }
+    monitors.truncate(5);
 
-    let suggested = if rating.rating_label.contains("Avoid") || valuation.valuation_label.contains("Value Trap")
-    {
-        "Avoid"
-    } else if rating.rating_label.contains("Expensive") {
-        "Wait for correction"
-    } else if rating.rating_label.contains("Watchlist") {
-        "Watch"
-    } else if rating.rating_label.contains("Buy") {
-        "Watch"
-    } else if rating.rating_label.contains("Hold") {
-        "Hold"
-    } else {
-        "Watch"
+    let suggested = match action_guidance.if_considering_entry.as_str() {
+        "Avoid" => "Avoid",
+        "Wait" => "Wait for correction",
+        "Buy" => "Buy",
+        _ => "Watch",
     }
     .to_string();
 
-    if fundamental.growth.interpretation.contains("Weak") && suggested == "Watch" {
-        // nudge
-    }
+    let final_view = format!(
+        "{} Overall score {:.0}/100 — {}. Financial strength audit {:.0}/100 (confidence: {}). {}",
+        action_guidance.headline,
+        rating.overall_score,
+        rating.rating_label,
+        audit.overall_strength_score,
+        audit.confidence,
+        entry.fundamental_vs_technical
+    );
 
     ResearchSummary {
         business_quality,
@@ -159,6 +162,7 @@ pub fn build_research_summary(
         key_negatives: negatives,
         key_monitorables: monitors,
         suggested_action: suggested,
-        disclaimer: "Outputs are heuristic research support from Yahoo-derived data. Not investment advice. Confirm with filings and your own judgment.".to_string(),
+        action_guidance,
+        disclaimer: "Outputs are heuristic research support from Yahoo-derived data. Contingent liabilities, related-party loans, and auditor footnotes require manual annual report review. Not investment advice.".to_string(),
     }
 }

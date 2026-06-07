@@ -82,7 +82,11 @@ pub struct ScreenRow {
     pub metrics: serde_json::Map<String, serde_json::Value>,
 }
 
-fn row_from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<ScreenRow> {
+const SYMBOL_SNAPSHOT_SELECT: &str = "s.symbol, sym.short_name, sym.sector, sym.industry, sym.exchange, \
+    sym.currency, sym.country, sym.tier, sym.face_value AS symbol_face_value, sym.last_refreshed_at, \
+    sym.last_refresh_status, sym.last_refresh_error, s.updated_at";
+
+fn metrics_map_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<serde_json::Map<String, serde_json::Value>> {
     let mut metrics = serde_json::Map::new();
     for id in MetricId::ALL {
         let v: Option<f64> = row.try_get(id.column())?;
@@ -94,12 +98,21 @@ fn row_from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<ScreenRow> {
             },
         );
     }
+    Ok(metrics)
+}
+
+fn row_from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<ScreenRow> {
+    let metrics = metrics_map_from_row(row)?;
+    let symbol: String = row.try_get("symbol")?;
+    let exchange = row
+        .try_get::<Option<String>, _>("exchange")?
+        .map(|raw| stocker_core::india_exchange_label(&symbol, Some(raw.as_str())).to_string());
     Ok(ScreenRow {
-        symbol: row.try_get("symbol")?,
+        symbol,
         short_name: row.try_get("short_name")?,
         sector: row.try_get("sector")?,
         industry: row.try_get("industry")?,
-        exchange: row.try_get("exchange")?,
+        exchange,
         currency: row.try_get("currency")?,
         country: row.try_get("country")?,
         tier: row.try_get("tier")?,
@@ -116,7 +129,8 @@ fn row_from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<ScreenRow> {
 pub async fn run_query(pool: &SqlitePool, query: &ScreenQuery) -> Result<Vec<ScreenRow>> {
     let limit = query.limit.clamp(1, 5000) as i64;
 
-    let mut sql = String::from("SELECT s.symbol, sym.short_name, sym.sector, sym.industry, sym.last_refreshed_at");
+    let mut sql = String::from("SELECT ");
+    sql.push_str(SYMBOL_SNAPSHOT_SELECT);
     for id in MetricId::ALL {
         sql.push_str(", s.");
         sql.push_str(id.column());
@@ -185,47 +199,17 @@ pub async fn run_query(pool: &SqlitePool, query: &ScreenQuery) -> Result<Vec<Scr
     let rows = sqlx::query_with(&sql, args).fetch_all(pool).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let mut metrics = serde_json::Map::new();
-        for id in MetricId::ALL {
-            let v: Option<f64> = row.try_get(id.column())?;
-            metrics.insert(
-                id.column().to_string(),
-                match v {
-                    Some(n) => serde_json::json!(n),
-                    None => serde_json::Value::Null,
-                },
-            );
-        }
-        out.push(ScreenRow {
-            symbol: row.try_get("symbol")?,
-            short_name: row.try_get("short_name")?,
-            sector: row.try_get("sector")?,
-            industry: row.try_get("industry")?,
-            exchange: None,
-            currency: None,
-            country: None,
-            tier: None,
-            face_value: None,
-            last_refreshed_at: row.try_get("last_refreshed_at")?,
-            last_refresh_status: None,
-            last_refresh_error: None,
-            updated_at: None,
-            metrics,
-        });
+        out.push(row_from_sql(&row)?);
     }
     Ok(out)
 }
 
 /// Load one symbol's snapshot row (all metric columns), if present.
+///
+/// `symbol` must already be a canonical Yahoo ticker (e.g. `RELIANCE.NS` or `SOMEBSE.BO`).
 pub async fn fetch_snapshot(pool: &SqlitePool, symbol: &str) -> Result<Option<ScreenRow>> {
-    let symbol = stocker_core::normalize_nse_symbol(symbol).map_err(|e| {
-        Error::InvalidQuery(e.to_string())
-    })?;
-    let mut sql = String::from(
-        "SELECT s.symbol, sym.short_name, sym.sector, sym.industry, sym.exchange, sym.currency, \
-         sym.country, sym.tier, sym.face_value AS symbol_face_value, sym.last_refreshed_at, \
-         sym.last_refresh_status, sym.last_refresh_error, s.updated_at",
-    );
+    let mut sql = String::from("SELECT ");
+    sql.push_str(SYMBOL_SNAPSHOT_SELECT);
     for id in MetricId::ALL {
         sql.push_str(", s.");
         sql.push_str(id.column());
