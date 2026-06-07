@@ -160,7 +160,14 @@ pub fn Screener() -> Element {
         div {
             style: "font-family: Inter, system-ui, sans-serif; max-width: 1180px; margin: 1.5rem auto; padding: 0 1rem 2rem;",
             div { style: "display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;",
-                Link { to: Route::Home {}, style: "color: #184ad8;", "← Home" }
+                Link {
+                    to: Route::Home {
+                        id: String::new(),
+                        exchange: String::new(),
+                    },
+                    style: "color: #184ad8;",
+                    "← Home"
+                }
                 h1 { style: "margin: 0;", "NSE Screener" }
                 if *tab.read() == ScreenerTab::Screen {
                     p { style: "color: #555; margin: 0;", "All conditions must match (AND)." }

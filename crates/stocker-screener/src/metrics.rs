@@ -193,6 +193,9 @@ pub enum MetricId {
     AvgWorkingCapitalDays3y,
     WorkingCapitalToSalesPct,
     DaysReceivableOutstanding,
+    DaysInventoryOutstanding,
+    DaysReceivableChange3y,
+    DaysInventoryChange3y,
     FinancialLeverage,
     InterestCoverageRatio,
 
@@ -202,6 +205,9 @@ pub enum MetricId {
     FreeCashflowTtm,
     FreeCashflow3ySum,
     FreeCashflow5ySum,
+    CumulativeCfoPat3y,
+    CumulativeCfoPat5y,
+    CfoPatLatestYear,
 
     // -------- Technical
     Dma50,
@@ -355,6 +361,9 @@ impl MetricId {
         MetricId::AvgWorkingCapitalDays3y,
         MetricId::WorkingCapitalToSalesPct,
         MetricId::DaysReceivableOutstanding,
+        MetricId::DaysInventoryOutstanding,
+        MetricId::DaysReceivableChange3y,
+        MetricId::DaysInventoryChange3y,
         MetricId::FinancialLeverage,
         MetricId::InterestCoverageRatio,
         MetricId::OperatingCashflowTtm,
@@ -362,6 +371,9 @@ impl MetricId {
         MetricId::FreeCashflowTtm,
         MetricId::FreeCashflow3ySum,
         MetricId::FreeCashflow5ySum,
+        MetricId::CumulativeCfoPat3y,
+        MetricId::CumulativeCfoPat5y,
+        MetricId::CfoPatLatestYear,
         MetricId::Dma50,
         MetricId::Dma200,
         MetricId::Macd,
@@ -492,6 +504,9 @@ pub const CATALOG: &[MetricSpec] = &[
     MetricSpec { id: MetricId::AvgWorkingCapitalDays3y, label: "Avg working capital days 3Y", description: "Average working capital days over last 3 years.", category: MetricCategory::BalanceSheet, unit: Unit::Days, source_kind: SourceKind::Composite, column: "avg_working_capital_days_3y", needs_review: false },
     MetricSpec { id: MetricId::WorkingCapitalToSalesPct, label: "Working capital to sales", description: "Working capital as percent of sales.", category: MetricCategory::BalanceSheet, unit: Unit::Percent, source_kind: SourceKind::Composite, column: "working_capital_to_sales_pct", needs_review: false },
     MetricSpec { id: MetricId::DaysReceivableOutstanding, label: "Days receivable outstanding", description: "Net receivables / sales x 365 (alias 'debtor days').", category: MetricCategory::BalanceSheet, unit: Unit::Days, source_kind: SourceKind::Composite, column: "days_receivable_outstanding", needs_review: false },
+    MetricSpec { id: MetricId::DaysInventoryOutstanding, label: "Days inventory outstanding", description: "Inventory / cost of revenue x 365.", category: MetricCategory::BalanceSheet, unit: Unit::Days, source_kind: SourceKind::Composite, column: "days_inventory_outstanding", needs_review: false },
+    MetricSpec { id: MetricId::DaysReceivableChange3y, label: "Receivable days change (3Y)", description: "Latest receivable days minus value ~2 years earlier (positive = slower collections).", category: MetricCategory::BalanceSheet, unit: Unit::Days, source_kind: SourceKind::Composite, column: "days_receivable_change_3y", needs_review: false },
+    MetricSpec { id: MetricId::DaysInventoryChange3y, label: "Inventory days change (3Y)", description: "Latest inventory days minus value ~2 years earlier (positive = slower turnover).", category: MetricCategory::BalanceSheet, unit: Unit::Days, source_kind: SourceKind::Composite, column: "days_inventory_change_3y", needs_review: false },
     MetricSpec { id: MetricId::FinancialLeverage, label: "Financial leverage", description: "Average total assets / net worth.", category: MetricCategory::BalanceSheet, unit: Unit::Multiple, source_kind: SourceKind::Composite, column: "financial_leverage", needs_review: false },
     MetricSpec { id: MetricId::InterestCoverageRatio, label: "Interest coverage ratio", description: "EBIT / interest expense.", category: MetricCategory::BalanceSheet, unit: Unit::Multiple, source_kind: SourceKind::Composite, column: "interest_coverage_ratio", needs_review: false },
 
@@ -501,6 +516,9 @@ pub const CATALOG: &[MetricSpec] = &[
     MetricSpec { id: MetricId::FreeCashflowTtm, label: "Free cash flow (TTM)", description: "Trailing 12 month free cash flow.", category: MetricCategory::CashFlow, unit: Unit::RupeesCr, source_kind: SourceKind::Live, column: "free_cashflow_ttm", needs_review: false },
     MetricSpec { id: MetricId::FreeCashflow3ySum, label: "Free cash flow 3Y sum", description: "Sum of free cash flow over last 3 years.", category: MetricCategory::CashFlow, unit: Unit::RupeesCr, source_kind: SourceKind::Statement, column: "free_cashflow_3y_sum", needs_review: false },
     MetricSpec { id: MetricId::FreeCashflow5ySum, label: "Free cash flow 5Y sum", description: "Sum of free cash flow over last 5 years.", category: MetricCategory::CashFlow, unit: Unit::RupeesCr, source_kind: SourceKind::Statement, column: "free_cashflow_5y_sum", needs_review: false },
+    MetricSpec { id: MetricId::CumulativeCfoPat3y, label: "Cumulative CFO / PAT (3Y)", description: "Sum of operating cash flow / sum of PAT over last 3 annual reports. ≥1.0 indicates earnings backed by cash.", category: MetricCategory::CashFlow, unit: Unit::Multiple, source_kind: SourceKind::Composite, column: "cumulative_cfo_pat_3y", needs_review: false },
+    MetricSpec { id: MetricId::CumulativeCfoPat5y, label: "Cumulative CFO / PAT (5Y)", description: "Sum of operating cash flow / sum of PAT over last 5 annual reports.", category: MetricCategory::CashFlow, unit: Unit::Multiple, source_kind: SourceKind::Composite, column: "cumulative_cfo_pat_5y", needs_review: false },
+    MetricSpec { id: MetricId::CfoPatLatestYear, label: "CFO / PAT (latest year)", description: "Operating cash flow / PAT in the latest annual report.", category: MetricCategory::CashFlow, unit: Unit::Multiple, source_kind: SourceKind::Composite, column: "cfo_pat_latest_year", needs_review: false },
 
     // ===== Technical =====
     MetricSpec { id: MetricId::Dma50, label: "DMA 50", description: "50-day exponential moving average of close.", category: MetricCategory::Technical, unit: Unit::Rupees, source_kind: SourceKind::Chart, column: "dma_50", needs_review: false },

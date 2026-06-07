@@ -4,8 +4,9 @@ use std::io;
 use std::sync::{Mutex, OnceLock};
 
 use crate::models::{
-    AnnualReport, AssetProfile, BalanceSheetRow, CashflowRow, ChartBar, ChartHistory, Financials,
-    IncomeStatementRow, NewsItem, PeerQuote, Shareholders, StatementBundle,
+    AnalystRecommendationPeriod, AnalystRecommendations, AnnualReport, AssetProfile, BalanceSheetRow,
+    CashflowRow, ChartBar, ChartHistory, Financials, IncomeStatementRow, InsiderTransaction,
+    InstitutionalHolder, MarketSignals, NewsItem, PeerQuote, Shareholders, StatementBundle,
 };
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -113,13 +114,12 @@ fn yahoo_opt_f64(v: &Value) -> Option<f64> {
         .filter(|x| x.is_finite())
 }
 
-/// Yahoo reports `debtToEquity` on a percent scale for many NSE tickers (e.g. 36.65 = 0.3665×).
+/// Yahoo reports `debtToEquity` as (total debt / equity) × 100 (e.g. 3.29 = 0.0329×, 36.65 = 0.3665×).
 pub fn normalize_debt_to_equity(raw: f64) -> f64 {
-    if raw.abs() > 10.0 {
-        raw / 100.0
-    } else {
-        raw
+    if !raw.is_finite() {
+        return 0.0;
     }
+    raw / 100.0
 }
 
 fn end_ts_from_value(end_date: &Value) -> Option<i64> {
@@ -244,6 +244,8 @@ fn parse_income_rows(arr: Option<&Vec<Value>>) -> Vec<IncomeStatementRow> {
             depreciation: 0.0,
             net_income: yahoo_raw_f64(&item["netIncome"]),
             diluted_eps: diluted,
+            other_income_expense: 0.0,
+            net_interest_income: 0.0,
         });
     }
     out
@@ -281,6 +283,8 @@ fn parse_balance_rows(arr: Option<&Vec<Value>>) -> Vec<BalanceSheetRow> {
             inventory: yahoo_raw_f64(&item["inventory"]),
             net_receivables: yahoo_raw_f64(&item["netReceivables"]),
             retained_earnings: yahoo_raw_f64(&item["retainedEarnings"]),
+            goodwill: yahoo_raw_f64(&item["goodwill"]),
+            intangible_assets: yahoo_raw_f64(&item["intangibleAssets"]),
         });
     }
     out
@@ -439,17 +443,76 @@ fn parse_roce_from_financial_data(fd: &Value) -> Option<f64> {
         .or_else(|| yahoo_opt_f64(&fd["returnOnInvestedCapital"]))
 }
 
+/// Common Yahoo `quoteSummary.result[0]` module slices.
+struct QuoteSummaryModules<'a> {
+    price: &'a Value,
+    financial_data: &'a Value,
+    summary_detail: &'a Value,
+    key_stats: &'a Value,
+}
+
+fn quote_summary_modules(result: &Value) -> QuoteSummaryModules<'_> {
+    QuoteSummaryModules {
+        price: &result["price"],
+        financial_data: &result["financialData"],
+        summary_detail: &result["summaryDetail"],
+        key_stats: &result["defaultKeyStatistics"],
+    }
+}
+
+fn quote_pe_pair(summary_detail: &Value) -> (f64, f64) {
+    let trailing_pe = yahoo_raw_f64(&summary_detail["trailingPE"]).max(0.0);
+    let forward_pe = yahoo_raw_f64(&summary_detail["forwardPE"]).max(0.0);
+    (trailing_pe, forward_pe)
+}
+
+fn quote_price_to_book(key_stats: &Value, summary_detail: &Value) -> f64 {
+    yahoo_raw_f64(&key_stats["priceToBook"]).max(yahoo_raw_f64(&summary_detail["priceToBook"]))
+}
+
+fn quote_price_to_sales(key_stats: &Value, summary_detail: &Value) -> f64 {
+    yahoo_raw_f64(&key_stats["priceToSalesTrailing12Months"])
+        .max(yahoo_raw_f64(&summary_detail["priceToSalesTrailing12Months"]))
+}
+
+fn merge_news_items(
+    items: Vec<NewsItem>,
+    base_symbol: &str,
+    tokens: &[String],
+    max_items: usize,
+) -> Vec<NewsItem> {
+    let mut seen_links = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for item in items {
+        if !item.link.is_empty() && !seen_links.insert(item.link.clone()) {
+            continue;
+        }
+        deduped.push(item);
+    }
+    deduped.sort_by(|a, b| {
+        let sa = news_relevance_score(&a.title, base_symbol, tokens);
+        let sb = news_relevance_score(&b.title, base_symbol, tokens);
+        sb.cmp(&sa)
+            .then_with(|| b.published_at.cmp(&a.published_at))
+    });
+    deduped
+        .into_iter()
+        .filter(|n| news_relevance_score(&n.title, base_symbol, tokens) > 0)
+        .take(max_items)
+        .collect()
+}
+
 pub async fn fetch_financials(symbol: &str) -> Financials {
     match fetch_quote_summary(symbol, "financialData,defaultKeyStatistics,summaryDetail,price").await {
         Ok(v) => {
             let result = &v["quoteSummary"]["result"][0];
-            let financial_data = &result["financialData"];
-            let summary_detail = &result["summaryDetail"];
-            let key_stats = &result["defaultKeyStatistics"];
-            let price_mod = &result["price"];
+            let modules = quote_summary_modules(result);
+            let financial_data = modules.financial_data;
+            let summary_detail = modules.summary_detail;
+            let key_stats = modules.key_stats;
+            let price_mod = modules.price;
 
-            let trailing_pe = yahoo_raw_f64(&summary_detail["trailingPE"]).max(0.0);
-            let forward_pe = yahoo_raw_f64(&summary_detail["forwardPE"]).max(0.0);
+            let (trailing_pe, forward_pe) = quote_pe_pair(summary_detail);
             let pe_display = if trailing_pe > 0.0 {
                 trailing_pe
             } else {
@@ -462,7 +525,7 @@ pub async fn fetch_financials(symbol: &str) -> Financials {
                 .map(String::from);
 
             let book_value = yahoo_raw_f64(&key_stats["bookValue"]);
-            let price_to_book = yahoo_raw_f64(&key_stats["priceToBook"]).max(0.0);
+            let price_to_book = quote_price_to_book(key_stats, summary_detail);
             let trailing_eps = yahoo_raw_f64(&key_stats["trailingEps"]);
             let forward_eps = yahoo_raw_f64(&key_stats["forwardEps"]);
 
@@ -501,8 +564,7 @@ pub async fn fetch_financials(symbol: &str) -> Financials {
             let cash = yahoo_raw_f64(&financial_data["totalCash"]);
             let roa = yahoo_opt_f64(&financial_data["returnOnAssets"]);
             let roce = parse_roce_from_financial_data(financial_data);
-            let ps = yahoo_raw_f64(&key_stats["priceToSalesTrailing12Months"])
-                .max(yahoo_raw_f64(&summary_detail["priceToSalesTrailing12Months"]));
+            let ps = quote_price_to_sales(key_stats, summary_detail);
             let vol = yahoo_raw_f64(&price_mod["regularMarketVolume"]);
             let avg10 = yahoo_raw_f64(&price_mod["averageDailyVolume10Day"]);
             let current_ratio = yahoo_opt_f64(&financial_data["currentRatio"]);
@@ -657,10 +719,15 @@ pub async fn fetch_asset_profile(symbol: &str) -> AssetProfile {
                 long_business_summary: ap["longBusinessSummary"].as_str().map(String::from),
                 website: ap["website"].as_str().map(String::from),
                 country: ap["country"].as_str().map(String::from),
-                exchange: price["exchange"]
-                    .as_str()
-                    .or_else(|| price["fullExchangeName"].as_str())
-                    .map(String::from),
+                // Yahoo returns internal codes (NSI, YHD) — map to NSE/BSE at the API boundary.
+                exchange: {
+                    let yahoo_exchange = price["exchange"]
+                        .as_str()
+                        .or_else(|| price["fullExchangeName"].as_str());
+                    Some(
+                        crate::symbol::india_exchange_label(symbol, yahoo_exchange).to_string(),
+                    )
+                },
                 currency: price["currency"].as_str().map(String::from),
             }
         }
@@ -683,20 +750,21 @@ pub async fn fetch_company_news(
     max_items: usize,
 ) -> Vec<NewsItem> {
     let base_symbol = symbol.trim_end_matches(".NS").to_uppercase();
-    let mut queries = vec![
-        format!("{} NSE India stock earnings", base_symbol),
-        format!("{} NSE India quarterly results", base_symbol),
-    ];
+    let mut queries = Vec::new();
     if let Some(name) = long_name.filter(|s| !s.trim().is_empty()) {
+        queries.push(format!("{} NSE India earnings", name.trim()));
         queries.push(format!("{} India stock", name.trim()));
-        queries.push(format!("{} earnings guidance India", name.trim()));
     }
+    queries.push(format!("{} NSE India stock earnings", base_symbol));
+    queries.push(format!("{} NSE India quarterly results", base_symbol));
     if let Some(ind) = industry.filter(|s| !s.trim().is_empty()) {
-        queries.push(format!("{} India stock sector news", ind.trim()));
+        queries.push(format!("{} India NSE stock news", ind.trim()));
     }
     if let Some(sec) = sector.filter(|s| !s.trim().is_empty()) {
         queries.push(format!("{} India NSE sector news", sec.trim()));
     }
+
+    let tokens = build_news_relevance_tokens(&base_symbol, long_name, industry, sector);
 
     let mut merged = Vec::new();
     for q in queries {
@@ -704,106 +772,168 @@ pub async fn fetch_company_news(
     }
 
     let mut seen_links = std::collections::HashSet::new();
-    let mut deduped = Vec::new();
-    for item in merged {
-        if !item.link.is_empty() && !seen_links.insert(item.link.clone()) {
-            continue;
-        }
-        deduped.push(item);
-    }
-
-    let mut tokens = vec![base_symbol.clone()];
-    if let Some(name) = long_name {
-        for w in name.split_whitespace() {
-            let token = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-            if token.len() >= 4 {
-                tokens.push(token.to_uppercase());
-            }
+    for item in &merged {
+        if !item.link.is_empty() {
+            seen_links.insert(item.link.clone());
         }
     }
-    if let Some(ind) = industry {
-        for w in ind.split_whitespace() {
-            let token = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-            if token.len() >= 4 {
-                tokens.push(token.to_uppercase());
-            }
-        }
-    }
-    if let Some(sec) = sector {
-        for w in sec.split_whitespace() {
-            let token = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-            if token.len() >= 4 {
-                tokens.push(token.to_uppercase());
-            }
-        }
-    }
-
-    deduped.sort_by(|a, b| {
-        let sa = news_relevance_score(&a.title, &tokens);
-        let sb = news_relevance_score(&b.title, &tokens);
-        sb.cmp(&sa)
-            .then_with(|| b.published_at.cmp(&a.published_at))
-    });
-    let mut filtered: Vec<NewsItem> = deduped
-        .into_iter()
-        .filter(|n| news_relevance_score(&n.title, &tokens) > 0)
-        .take(max_items)
-        .collect();
+    let mut filtered = merge_news_items(merged, &base_symbol, &tokens, max_items);
     if filtered.len() < max_items.saturating_div(2) {
         let mut fallback_queries = Vec::new();
         if let Some(name) = long_name.filter(|s| !s.trim().is_empty()) {
             fallback_queries.push(format!("{} NSE India", name.trim()));
         }
+        fallback_queries.push(format!("{} NSE India", base_symbol));
         if let Some(ind) = industry.filter(|s| !s.trim().is_empty()) {
             fallback_queries.push(format!("{} India listed companies", ind.trim()));
         }
-        if let Some(sec) = sector.filter(|s| !s.trim().is_empty()) {
-            fallback_queries.push(format!("{} India market news", sec.trim()));
-        }
-        fallback_queries.push(format!("{} NSE India", base_symbol));
 
         let mut fallback_items = Vec::new();
-        let mut seen_links = std::collections::HashSet::new();
+        let mut fallback_seen = seen_links;
         for query in fallback_queries {
             for item in fetch_news_for_query(&query, max_items as u32).await {
-                if !item.link.is_empty() && !seen_links.insert(item.link.clone()) {
+                if !item.link.is_empty() && !fallback_seen.insert(item.link.clone()) {
                     continue;
                 }
-                fallback_items.push(item);
-                if fallback_items.len() >= max_items {
-                    break;
+                if news_relevance_score(&item.title, &base_symbol, &tokens) > 0 {
+                    fallback_items.push(item);
                 }
             }
-            if fallback_items.len() >= max_items {
+        }
+        fallback_items.sort_by(|a, b| {
+            let sa = news_relevance_score(&a.title, &base_symbol, &tokens);
+            let sb = news_relevance_score(&b.title, &base_symbol, &tokens);
+            sb.cmp(&sa)
+                .then_with(|| b.published_at.cmp(&a.published_at))
+        });
+        for item in fallback_items {
+            if filtered.len() >= max_items {
                 break;
             }
+            if filtered.iter().any(|x| x.link == item.link) {
+                continue;
+            }
+            filtered.push(item);
         }
-        filtered = fallback_items;
     }
     filtered
 }
 
-fn news_relevance_score(title: &str, tokens: &[String]) -> i32 {
-    let lower = title.to_lowercase();
-    let mut score = 0;
-    for t in tokens {
-        let t = t.to_lowercase();
-        if !t.is_empty() && lower.contains(&t) {
-            score += 2;
+const NEWS_NAME_STOP_WORDS: &[&str] = &[
+    "limited", "ltd", "inc", "corp", "corporation", "company", "group", "holdings", "plc",
+    "international", "global", "enterprises",
+];
+
+fn is_news_name_stop_word(token: &str) -> bool {
+    NEWS_NAME_STOP_WORDS
+        .iter()
+        .any(|w| w.eq_ignore_ascii_case(token))
+}
+
+fn build_news_relevance_tokens(
+    base_symbol: &str,
+    long_name: Option<&str>,
+    industry: Option<&str>,
+    sector: Option<&str>,
+) -> Vec<String> {
+    let mut tokens = vec![base_symbol.to_string()];
+    if let Some(name) = long_name {
+        for w in name.split_whitespace() {
+            let token = w.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+            if token.len() >= 4 && !is_news_name_stop_word(&token) {
+                tokens.push(token.to_uppercase());
+            }
         }
     }
-    if lower.contains("earnings") || lower.contains("results") || lower.contains("guidance") {
+    for source in [industry, sector] {
+        if let Some(text) = source {
+            for w in text.split_whitespace() {
+                let token = w.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+                if token.len() >= 5 && !is_news_name_stop_word(&token) {
+                    tokens.push(token.to_uppercase());
+                }
+            }
+        }
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn news_has_india_context(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    [
+        "india", "indian", "nse", "bse", "sensex", "nifty", "mumbai", "rupee", "sebi",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
+
+fn title_contains_word(title_lower: &str, token_lower: &str) -> bool {
+    if token_lower.is_empty() {
+        return false;
+    }
+    title_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == token_lower)
+}
+
+fn news_relevance_score(title: &str, base_symbol: &str, tokens: &[String]) -> i32 {
+    let lower = title.to_lowercase();
+    let sym = base_symbol.to_lowercase();
+    let mut score = 0;
+
+    if title_contains_word(&lower, &sym) {
+        score += 6;
+        if news_has_india_context(title) {
+            score += 3;
+        }
+    } else {
+        let mut matched_name = false;
+        for t in tokens.iter().skip(1) {
+            let t = t.to_lowercase();
+            if title_contains_word(&lower, &t) {
+                matched_name = true;
+                score += 2;
+            }
+        }
+        if !matched_name {
+            return 0;
+        }
+        if !news_has_india_context(title) {
+            return 0;
+        }
+    }
+
+    if lower.contains("earnings")
+        || lower.contains("results")
+        || lower.contains("guidance")
+        || lower.contains("dividend")
+        || lower.contains("quarter")
+    {
         score += 1;
     }
     score
+}
+
+fn sector_news_relevance(title: &str, topic: &str) -> bool {
+    if !news_has_india_context(title) {
+        return false;
+    }
+    let lower = title.to_lowercase();
+    topic
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|w| w.len() >= 4)
+        .any(|w| lower.contains(&w))
 }
 
 pub async fn fetch_sector_news(sector_or_topic: &str) -> Vec<NewsItem> {
     let topic = sector_or_topic.trim();
     let queries = [
         format!("{} India sector news", topic),
-        format!("{} India listed companies", topic),
-        format!("{} NSE BSE market updates", topic),
+        format!("{} India listed companies NSE", topic),
+        format!("{} NSE BSE market updates India", topic),
     ];
     let mut merged = Vec::new();
     let mut seen_links = std::collections::HashSet::new();
@@ -812,7 +942,9 @@ pub async fn fetch_sector_news(sector_or_topic: &str) -> Vec<NewsItem> {
             if !item.link.is_empty() && !seen_links.insert(item.link.clone()) {
                 continue;
             }
-            merged.push(item);
+            if sector_news_relevance(&item.title, topic) {
+                merged.push(item);
+            }
         }
     }
     merged
@@ -852,24 +984,35 @@ async fn fetch_news_for_query(q: &str, news_count: u32) -> Vec<NewsItem> {
 
 /// Discover NSE peer symbols via Yahoo search using industry/sector terms.
 pub async fn discover_nse_peer_symbols(subject: &str, industry: Option<&str>, sector: Option<&str>, limit: usize) -> Vec<String> {
-    let mut query = String::new();
-    if let Some(ind) = industry {
-        if !ind.is_empty() && ind != "Unknown" {
-            query.push_str(ind);
-        }
-    } else if let Some(sec) = sector {
-        if !sec.is_empty() {
-            query.push_str(sec);
+    let mut search_queries = Vec::new();
+    if let Some(ind) = industry.filter(|s| !s.is_empty() && *s != "Unknown") {
+        search_queries.push(format!("{ind} NSE India"));
+        let ind_lower = ind.to_lowercase();
+        if ind_lower.contains("tobacco") || ind_lower.contains("packaged food") {
+            search_queries.push("FMCG NSE India".to_string());
         }
     }
-    if query.is_empty() {
-        return fallback_peer_symbols(subject, industry, sector, limit);
+    if let Some(sec) = sector.filter(|s| !s.is_empty()) {
+        let q = format!("{sec} NSE India");
+        if !search_queries.iter().any(|existing| existing == &q) {
+            search_queries.push(q);
+        }
     }
-    query.push_str(" NSE India");
 
+    for query in search_queries {
+        let found = yahoo_search_nse_peers(subject, &query, limit).await;
+        if !found.is_empty() {
+            return found;
+        }
+    }
+
+    fallback_peer_symbols(subject, industry, sector, limit)
+}
+
+async fn yahoo_search_nse_peers(subject: &str, query: &str, limit: usize) -> Vec<String> {
     let url = format!(
         "https://query2.finance.yahoo.com/v1/finance/search?q={}&quotesCount=25&newsCount=0",
-        urlencoding::encode(&query)
+        urlencoding::encode(query)
     );
     let client = http_client();
     let mut out = Vec::new();
@@ -902,11 +1045,7 @@ pub async fn discover_nse_peer_symbols(subject: &str, industry: Option<&str>, se
             break;
         }
     }
-    if out.is_empty() {
-        fallback_peer_symbols(subject, industry, sector, limit)
-    } else {
-        out
-    }
+    out
 }
 
 fn fallback_peer_symbols(subject: &str, industry: Option<&str>, sector: Option<&str>, limit: usize) -> Vec<String> {
@@ -979,6 +1118,25 @@ fn fallback_peer_symbols(subject: &str, industry: Option<&str>, sector: Option<&
             "JKCEMENT.NS",
             "NUVOCO.NS",
         ];
+    } else if ind.contains("tobacco")
+        || ind.contains("fmcg")
+        || ind.contains("packaged food")
+        || ind.contains("household")
+        || ind.contains("personal products")
+        || ind.contains("confectioners")
+        || sec.contains("consumer defensive")
+        || sec.contains("consumer staples")
+    {
+        peers = vec![
+            "HINDUNILVR.NS",
+            "NESTLEIND.NS",
+            "BRITANNIA.NS",
+            "DABUR.NS",
+            "GODREJCP.NS",
+            "MARICO.NS",
+            "COLPAL.NS",
+            "GODFRYPHLP.NS",
+        ];
     }
 
     peers
@@ -1005,22 +1163,24 @@ pub async fn fetch_peer_quotes(symbols: &[String]) -> Vec<PeerQuote> {
             continue;
         };
         let result = &v["quoteSummary"]["result"][0];
-        let price_mod = &result["price"];
-        let financial_data = &result["financialData"];
-        let summary_detail = &result["summaryDetail"];
-        let key_stats = &result["defaultKeyStatistics"];
+        let modules = quote_summary_modules(result);
+        let price_mod = modules.price;
+        let financial_data = modules.financial_data;
+        let summary_detail = modules.summary_detail;
+        let key_stats = modules.key_stats;
         let symbol = price_mod["symbol"]
             .as_str()
             .unwrap_or(symbol)
             .to_string();
         let price = price_mod["regularMarketPrice"]["raw"].as_f64().unwrap_or(0.0);
-        let pe = summary_detail["trailingPE"]["raw"]
-            .as_f64()
-            .or_else(|| summary_detail["forwardPE"]["raw"].as_f64())
-            .unwrap_or(0.0);
-        let forward_pe = summary_detail["forwardPE"]["raw"].as_f64().unwrap_or(0.0);
-        let pb = yahoo_raw_f64(&key_stats["priceToBook"]).max(yahoo_raw_f64(&summary_detail["priceToBook"]));
-        let ps = yahoo_raw_f64(&key_stats["priceToSalesTrailing12Months"]);
+        let (trailing_pe, forward_pe) = quote_pe_pair(summary_detail);
+        let pe = if trailing_pe > 0.0 {
+            trailing_pe
+        } else {
+            forward_pe
+        };
+        let pb = quote_price_to_book(key_stats, summary_detail);
+        let ps = quote_price_to_sales(key_stats, summary_detail);
         let ebitda = financial_data["ebitda"]["raw"].as_f64().unwrap_or(0.0);
         let ev = financial_data["enterpriseValue"]["raw"].as_f64().unwrap_or(0.0);
         let ev_to_ebitda = if ev > 0.0 && ebitda > 0.0 {
@@ -1086,20 +1246,252 @@ pub async fn fetch_peer_quotes(symbols: &[String]) -> Vec<PeerQuote> {
     rows
 }
 
+pub async fn fetch_market_signals(symbol: &str) -> MarketSignals {
+    match fetch_quote_summary(
+        symbol,
+        "recommendationTrend,insiderTransactions,institutionOwnership",
+    )
+    .await
+    {
+        Ok(v) => {
+            let result = &v["quoteSummary"]["result"][0];
+            let analyst = parse_analyst_recommendations(&result["recommendationTrend"]);
+            let insider_transactions = parse_insider_transactions(&result["insiderTransactions"]);
+            let institutional_holders =
+                parse_institutional_holders(&result["institutionOwnership"]);
+            let narrative = build_market_signals_narrative(
+                &analyst,
+                &insider_transactions,
+                &institutional_holders,
+            );
+            MarketSignals {
+                analyst,
+                insider_transactions,
+                institutional_holders,
+                narrative,
+            }
+        }
+        Err(e) => {
+            log::error!("Error fetching market signals for {symbol}: {e}");
+            MarketSignals::default()
+        }
+    }
+}
+
+fn parse_analyst_recommendations(node: &Value) -> AnalystRecommendations {
+    let mut trend = Vec::new();
+    if let Some(items) = node["trend"].as_array() {
+        for item in items {
+            trend.push(AnalystRecommendationPeriod {
+                period: item["period"].as_str().unwrap_or("").to_string(),
+                strong_buy: item["strongBuy"].as_u64().unwrap_or(0) as u32,
+                buy: item["buy"].as_u64().unwrap_or(0) as u32,
+                hold: item["hold"].as_u64().unwrap_or(0) as u32,
+                sell: item["sell"].as_u64().unwrap_or(0) as u32,
+                strong_sell: item["strongSell"].as_u64().unwrap_or(0) as u32,
+            });
+        }
+    }
+    let latest = trend
+        .iter()
+        .find(|p| p.period == "0m")
+        .or_else(|| trend.first());
+    let (net_bullish_score, consensus_label) = match latest {
+        Some(p) => {
+            let bullish = (p.strong_buy + p.buy) as i32;
+            let bearish = (p.sell + p.strong_sell) as i32;
+            let net = bullish - bearish;
+            let label = if bullish > bearish + 3 {
+                "Analyst consensus: Bullish"
+            } else if bearish > bullish + 2 {
+                "Analyst consensus: Bearish"
+            } else {
+                "Analyst consensus: Neutral / Hold-heavy"
+            };
+            (net, label.to_string())
+        }
+        None => (0, "No analyst recommendation trend data".to_string()),
+    };
+    AnalystRecommendations {
+        trend,
+        net_bullish_score,
+        consensus_label,
+    }
+}
+
+fn parse_insider_transactions(node: &Value) -> Vec<InsiderTransaction> {
+    let mut out = Vec::new();
+    if let Some(items) = node["transactions"].as_array() {
+        for item in items.iter().take(12) {
+            let shares = yahoo_raw_f64(&item["shares"]);
+            if shares == 0.0 {
+                continue;
+            }
+            let value = item["value"]["raw"]
+                .as_f64()
+                .or_else(|| item["value"].as_f64());
+            out.push(InsiderTransaction {
+                filer_name: item["filerName"]
+                    .as_str()
+                    .or_else(|| item["filerUrl"].as_str())
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                transaction_text: item["transactionText"]
+                    .as_str()
+                    .or_else(|| item["ownership"].as_str())
+                    .unwrap_or("Transaction")
+                    .to_string(),
+                shares,
+                value,
+                start_date: item["startDate"]["fmt"]
+                    .as_str()
+                    .or_else(|| item["startDate"].as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn parse_institutional_holders(node: &Value) -> Vec<InstitutionalHolder> {
+    let mut out = Vec::new();
+    if let Some(items) = node["ownershipList"].as_array() {
+        for item in items.iter().take(10) {
+            let pct = yahoo_raw_f64(&item["pctHeld"])
+                .max(yahoo_raw_f64(&item["pctHeld"]["raw"]));
+            let pct = if pct > 1.0 { pct / 100.0 } else { pct };
+            out.push(InstitutionalHolder {
+                organization: item["organization"]
+                    .as_str()
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                pct_held: pct,
+                position: yahoo_raw_f64(&item["position"]),
+                value: yahoo_raw_f64(&item["value"]),
+                report_date: item["reportDate"]["fmt"]
+                    .as_str()
+                    .or_else(|| item["reportDate"].as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn build_market_signals_narrative(
+    analyst: &AnalystRecommendations,
+    insiders: &[InsiderTransaction],
+    institutions: &[InstitutionalHolder],
+) -> String {
+    let mut parts = vec![analyst.consensus_label.clone()];
+    if !insiders.is_empty() {
+        let net: f64 = insiders.iter().map(|t| t.shares).sum();
+        if net > 0.0 {
+            parts.push("Recent insider activity skews toward net buying.".to_string());
+        } else if net < 0.0 {
+            parts.push("Recent insider activity skews toward net selling.".to_string());
+        }
+    }
+    if let Some(top) = institutions.first() {
+        parts.push(format!(
+            "Largest reported institutional holder: {} ({:.1}% reported).",
+            top.organization,
+            top.pct_held * 100.0
+        ));
+    }
+    if parts.len() == 1 && analyst.trend.is_empty() && insiders.is_empty() && institutions.is_empty()
+    {
+        "Market signal data sparse for this symbol on Yahoo.".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::normalize_debt_to_equity;
+    use super::{
+        build_news_relevance_tokens, fallback_peer_symbols, news_relevance_score,
+        normalize_debt_to_equity, sector_news_relevance,
+    };
 
     #[test]
     fn normalize_debt_to_equity_scales_yahoo_percent_values() {
         assert!((normalize_debt_to_equity(36.65) - 0.3665).abs() < 1e-9);
         assert!((normalize_debt_to_equity(120.0) - 1.20).abs() < 1e-9);
+        assert!((normalize_debt_to_equity(3.292) - 0.03292).abs() < 1e-9);
+        assert!((normalize_debt_to_equity(9.827) - 0.09827).abs() < 1e-9);
+        assert!((normalize_debt_to_equity(0.0) - 0.0).abs() < 1e-9);
     }
 
     #[test]
-    fn normalize_debt_to_equity_leaves_ratio_values_unchanged() {
-        assert!((normalize_debt_to_equity(0.37) - 0.37).abs() < 1e-9);
-        assert!((normalize_debt_to_equity(1.5) - 1.5).abs() < 1e-9);
-        assert!((normalize_debt_to_equity(-5.0) - (-5.0)).abs() < 1e-9);
+    fn fallback_peer_symbols_includes_fmcg_for_tobacco() {
+        let peers = fallback_peer_symbols("ITC.NS", Some("Tobacco"), Some("Consumer Defensive"), 8);
+        assert!(peers.len() >= 4, "expected FMCG peers, got {peers:?}");
+        assert!(peers.iter().any(|p| p == "HINDUNILVR.NS"));
+        assert!(!peers.iter().any(|p| p.eq_ignore_ascii_case("ITC.NS")));
+    }
+
+    #[test]
+    fn news_relevance_rejects_unrelated_headlines() {
+        let tokens = build_news_relevance_tokens(
+            "ITC",
+            Some("ITC Limited"),
+            Some("Tobacco"),
+            Some("Consumer Defensive"),
+        );
+        assert_eq!(
+            news_relevance_score(
+                "Trump to join Biden in 80-year-old presidents' club",
+                "ITC",
+                &tokens
+            ),
+            0
+        );
+        assert_eq!(
+            news_relevance_score(
+                "Warren Buffett Offloaded a Chunk of His Biggest Holding",
+                "ITC",
+                &tokens
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn news_relevance_accepts_itc_india_headline() {
+        let tokens = build_news_relevance_tokens(
+            "ITC",
+            Some("ITC Limited"),
+            Some("Tobacco"),
+            Some("Consumer Defensive"),
+        );
+        assert!(
+            news_relevance_score(
+                "ITC Q3 results: net profit rises, board declares interim dividend",
+                "ITC",
+                &tokens
+            ) > 0
+        );
+        assert!(
+            news_relevance_score(
+                "ITC Limited shares edge higher on NSE after earnings beat",
+                "ITC",
+                &tokens
+            ) > 0
+        );
+    }
+
+    #[test]
+    fn sector_news_requires_india_and_topic() {
+        assert!(!sector_news_relevance(
+            "Warren Buffett Offloaded a Chunk of His Biggest Holding",
+            "Tobacco"
+        ));
+        assert!(sector_news_relevance(
+            "India tobacco sector faces new packaging norms for NSE-listed firms",
+            "Tobacco"
+        ));
     }
 }

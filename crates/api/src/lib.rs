@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
+use handlers::AppState;
 use stocker_screener::ScreenerService;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -19,9 +20,15 @@ pub fn router(service: Option<Arc<ScreenerService>>) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    let state = AppState { screener: service.clone() };
+
     let mut router = Router::new()
         .route("/health", get(handlers::health))
-        .route("/api/v1/symbols/{symbol}/report", get(handlers::api_report));
+        .route(
+            "/api/v1/symbols/{symbol}/report",
+            get(handlers::api_report),
+        )
+        .with_state(state);
 
     if let Some(svc) = service {
         router = router.merge(screener::router(svc));

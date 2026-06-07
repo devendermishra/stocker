@@ -16,7 +16,7 @@ struct Cli {
 enum Command {
     /// Fetch and print a research report for one symbol (JSON to stdout)
     Report {
-        /// Stock symbol (e.g. RELIANCE or RELIANCE.NS)
+        /// Stock symbol (e.g. RELIANCE, RELIANCE.NS, or SOMEBSE.BO)
         symbol: String,
     },
     /// Run a screener query against the local SQLite database
@@ -34,11 +34,14 @@ enum Command {
         #[arg(short, long)]
         db: Option<PathBuf>,
     },
-    /// Load universe symbols from a local CSV into the `symbols` table (no NSE network calls)
+    /// Load universe symbols from local CSV files into the `symbols` table (no exchange network calls)
     Universe {
-        /// Path to universe CSV (or set STOCKER_UNIVERSE_CSV). NSE EQUITY_L format or a `symbol` column.
+        /// NSE universe CSV (or set STOCKER_UNIVERSE_CSV). EQUITY_L format or a `symbol` column.
         #[arg(short, long)]
         csv: Option<PathBuf>,
+        /// BSE universe CSV (or set STOCKER_BSE_UNIVERSE_CSV). List of Securities export.
+        #[arg(long)]
+        bse_csv: Option<PathBuf>,
         #[arg(short, long)]
         db: Option<PathBuf>,
     },
@@ -80,7 +83,7 @@ async fn main() {
 
     match Cli::parse().command {
         Command::Report { symbol } => {
-            match stocker_core::build_research_report(&symbol).await {
+            match stocker_core::build_research_report(&symbol, None, None).await {
                 Ok(report) => println!("{}", serde_json::to_string_pretty(&report).unwrap()),
                 Err(e) => {
                     eprintln!("Error: {}", e);
@@ -98,8 +101,8 @@ async fn main() {
                 std::process::exit(code);
             }
         }
-        Command::Universe { csv, db } => {
-            if let Err(code) = run_universe(csv.as_deref(), db.as_deref()).await {
+        Command::Universe { csv, bse_csv, db } => {
+            if let Err(code) = run_universe(csv.as_deref(), bse_csv.as_deref(), db.as_deref()).await {
                 std::process::exit(code);
             }
         }
@@ -287,19 +290,28 @@ async fn run_status(db: Option<&Path>) -> Result<(), i32> {
     Ok(())
 }
 
-async fn run_universe(csv: Option<&Path>, db: Option<&Path>) -> Result<(), i32> {
+async fn run_universe(
+    csv: Option<&Path>,
+    bse_csv: Option<&Path>,
+    db: Option<&Path>,
+) -> Result<(), i32> {
     let svc = open_service(db).await?;
     let path = db.map(Path::to_path_buf).unwrap_or_else(default_db_path);
     eprintln!(
-        "Loading screener universe from local CSV (no NSE scraping; stock data via Yahoo)…"
+        "Loading screener universe from local CSV (no exchange scraping; stock data via Yahoo)…"
     );
-    if csv.is_none() && stocker_screener::universe_csv::universe_csv_path().is_none() {
+    if csv.is_none()
+        && bse_csv.is_none()
+        && stocker_screener::universe_csv::universe_csv_path().is_none()
+        && stocker_screener::universe_csv::bse_universe_csv_path().is_none()
+    {
         eprintln!(
-            "Hint: pass --csv <file> or set {} to your downloaded symbol list.",
-            stocker_screener::universe_csv::ENV_UNIVERSE_CSV
+            "Hint: pass --csv <nse-file> [--bse-csv <bse-file>] or set {} / {}.",
+            stocker_screener::universe_csv::ENV_UNIVERSE_CSV,
+            stocker_screener::universe_csv::ENV_BSE_UNIVERSE_CSV,
         );
     }
-    let discovered = stocker_screener::universe::discover_universe(csv).await;
+    let discovered = stocker_screener::universe::discover_universe_all(csv, bse_csv).await;
     eprintln!("Found {} symbols; writing to {}…", discovered.len(), path.display());
     let n = stocker_screener::universe::sync_universe(svc.pool(), &discovered)
         .await
@@ -322,11 +334,11 @@ async fn run_universe(csv: Option<&Path>, db: Option<&Path>) -> Result<(), i32> 
 }
 
 async fn run_refresh(symbol: &str, db: Option<&Path>) -> Result<(), i32> {
-    let symbol = stocker_core::normalize_nse_symbol(symbol).map_err(|e| {
+    let svc = open_service(db).await?;
+    let symbol = svc.resolve_symbol(symbol).await.map_err(|e| {
         eprintln!("Invalid symbol: {}", e);
         1
     })?;
-    let svc = open_service(db).await?;
     svc.refresh_now(&symbol).await.map_err(|e| {
         eprintln!("Refresh failed: {}", e);
         1

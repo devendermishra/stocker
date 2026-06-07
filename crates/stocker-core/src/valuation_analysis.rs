@@ -1,20 +1,8 @@
+use crate::math::median;
 use crate::models::{
     ChartHistory, EarningsBasedValue, Financials, FundamentalAnalysis, HistoricalMultiples,
     IncomeStatementRow, PeerQuote, PeerValuationCompare, StatementBundle, ValuationAnalysis,
 };
-
-fn median(mut xs: Vec<f64>) -> Option<f64> {
-    if xs.is_empty() {
-        return None;
-    }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = xs.len();
-    Some(if n % 2 == 1 {
-        xs[n / 2]
-    } else {
-        (xs[n / 2 - 1] + xs[n / 2]) / 2.0
-    })
-}
 
 fn closest_close(chart: &ChartHistory, target_ts: i64) -> Option<f64> {
     if chart.bars.is_empty() {

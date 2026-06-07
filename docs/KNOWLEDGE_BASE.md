@@ -20,7 +20,7 @@ Stocker is an NSE-oriented stock research workspace written in Rust. It:
 
 | Path | Crate / role |
 |------|----------------|
-| `crates/stocker-core` | Fetch, models, analysis, `build_research_report` |
+| `crates/stocker-core` | Fetch, models, analysis, shared `math` / `statements` helpers, `build_research_report` |
 | `crates/stocker-screener` | SQLite snapshots, metric catalog, refresh scheduler, query engine |
 | `crates/api` | Axum HTTP server (`stocker-api`) — research + screener routes |
 | `crates/cli` | Headless CLI — reports, screener queries, universe sync, backfill |
@@ -264,6 +264,12 @@ Central switch: `frontend/src/api.rs` (research) and `frontend/src/screener_api.
 | "Already running" on refresh | Backfill in progress | Wait for current job; status shows `backfill_running` |
 | Only ~508 symbols | No universe CSV | Set `STOCKER_UNIVERSE_CSV` and run `universe` |
 | `dx` not found | Dioxus CLI missing | `cargo install dioxus-cli --locked` |
+
+---
+
+## Shared backend utilities
+
+Financial math (`pct_change`, `cagr`, `median`) and statement sorting helpers live in `stocker-core` (`math.rs`, `statements.rs`) so analysis modules and the screener metric engine share one implementation. The screener's `compute_all` function delegates to section builders (price, valuation, balance sheet, technical, composites, etc.) rather than one monolithic block.
 
 ---
 

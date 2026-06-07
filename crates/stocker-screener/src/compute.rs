@@ -5,12 +5,22 @@
 //! every metric in the catalog. Each extractor returns `None` when its inputs
 //! aren't sufficient (e.g. less than 7 years of statements for `historical_pe_7y`),
 //! and the corresponding column is then NULL on the snapshot row.
+//!
+//! `compute_all` delegates to section functions (`compute_price_metrics`,
+//! `compute_market_structure_metrics`, `compute_valuation_metrics`, etc.) that
+//! share a [`ComputeContext`] of pre-resolved statement slices and cross-section
+//! values (price, market cap, P/E, etc.).
 
 use std::collections::HashMap;
 
+use stocker_core::math::{cagr, median};
 use stocker_core::models::{
     AssetProfile, BalanceSheetRow, CashflowRow, ChartHistory, Financials, IncomeStatementRow,
     PeerQuote, StatementBundle,
+};
+use stocker_core::statements::{
+    balance_annual_asc, cashflow_annual_asc, cashflow_quarterly_asc, income_annual_asc,
+    income_quarterly_asc,
 };
 use stocker_core::technical_analysis::{macd_components, roc_pct, sma_last};
 
@@ -43,60 +53,6 @@ fn pos(value: f64) -> Option<f64> {
 #[inline]
 fn nonzero(value: f64) -> Option<f64> {
     finite(value).filter(|v| v.abs() > 1e-12)
-}
-
-/// Median of a slice of finite f64.
-fn median(mut values: Vec<f64>) -> Option<f64> {
-    values.retain(|v| v.is_finite());
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = values.len();
-    if n % 2 == 1 {
-        Some(values[n / 2])
-    } else {
-        Some((values[n / 2 - 1] + values[n / 2]) / 2.0)
-    }
-}
-
-/// CAGR over `years` between the two endpoints (`first` is older).
-fn cagr_pct(first: f64, last: f64, years: f64) -> Option<f64> {
-    if !first.is_finite() || !last.is_finite() || first <= 0.0 || last <= 0.0 || years <= 0.0 {
-        return None;
-    }
-    Some(((last / first).powf(1.0 / years) - 1.0) * 100.0)
-}
-
-/// Ascending-by-time annual income statements (oldest first).
-fn income_annual_asc(b: &StatementBundle) -> Vec<&IncomeStatementRow> {
-    let mut v: Vec<&IncomeStatementRow> = b.income_annual.iter().collect();
-    v.sort_by_key(|r| r.end_ts.unwrap_or(0));
-    v
-}
-
-fn balance_annual_asc(b: &StatementBundle) -> Vec<&BalanceSheetRow> {
-    let mut v: Vec<&BalanceSheetRow> = b.balance_annual.iter().collect();
-    v.sort_by_key(|r| r.end_ts.unwrap_or(0));
-    v
-}
-
-fn cashflow_annual_asc(b: &StatementBundle) -> Vec<&CashflowRow> {
-    let mut v: Vec<&CashflowRow> = b.cashflow_annual.iter().collect();
-    v.sort_by_key(|r| r.end_ts.unwrap_or(0));
-    v
-}
-
-fn income_quarterly_asc(b: &StatementBundle) -> Vec<&IncomeStatementRow> {
-    let mut v: Vec<&IncomeStatementRow> = b.income_quarterly.iter().collect();
-    v.sort_by_key(|r| r.end_ts.unwrap_or(0));
-    v
-}
-
-fn cashflow_quarterly_asc(b: &StatementBundle) -> Vec<&CashflowRow> {
-    let mut v: Vec<&CashflowRow> = b.cashflow_quarterly.iter().collect();
-    v.sort_by_key(|r| r.end_ts.unwrap_or(0));
-    v
 }
 
 fn closes(chart: &ChartHistory) -> Vec<f64> {
@@ -338,7 +294,7 @@ fn cagr_from_closes(closes: &[f64], n_days: usize) -> Option<f64> {
         return None;
     }
     let years = n_days as f64 / 252.0;
-    Some(((last / first).powf(1.0 / years) - 1.0) * 100.0)
+    cagr(first, last, years)
 }
 
 /// Convenience accessor: latest annual row, oldest matching, etc.
@@ -352,6 +308,51 @@ fn nth_from_back<'a, T>(rows: &'a [&T], n: usize) -> Option<&'a T> {
     }
     let idx = rows.len().checked_sub(1 + n)?;
     Some(rows[idx])
+}
+
+fn receivable_days(b: &BalanceSheetRow, i: &IncomeStatementRow) -> Option<f64> {
+    if i.revenue > 0.0 && b.net_receivables > 0.0 {
+        finite((b.net_receivables / i.revenue) * 365.0)
+    } else {
+        None
+    }
+}
+
+fn inventory_days(b: &BalanceSheetRow, i: &IncomeStatementRow) -> Option<f64> {
+    if i.cost_of_revenue > 0.0 && b.inventory > 0.0 {
+        finite((b.inventory / i.cost_of_revenue) * 365.0)
+    } else {
+        None
+    }
+}
+
+fn days_change_3y(
+    balance_a: &[&BalanceSheetRow],
+    income_a: &[&IncomeStatementRow],
+    calc: fn(&BalanceSheetRow, &IncomeStatementRow) -> Option<f64>,
+) -> Option<f64> {
+    let latest = calc(
+        nth_from_back(balance_a, 0)?,
+        nth_from_back(income_a, 0)?,
+    )?;
+    let older = calc(
+        nth_from_back(balance_a, 2)?,
+        nth_from_back(income_a, 2)?,
+    )?;
+    finite(latest - older)
+}
+
+fn cfo_pat_latest_year(
+    income_a: &[&IncomeStatementRow],
+    cash_a: &[&CashflowRow],
+) -> Option<f64> {
+    let pat = latest(income_a)?.net_income;
+    let cfo = latest(cash_a)?.operating_cashflow;
+    if pat.abs() < 1e-6 {
+        None
+    } else {
+        finite(cfo / pat)
+    }
 }
 
 /// Working capital = current assets - current liabilities.
@@ -491,13 +492,38 @@ fn historical_eps_from_row(r: &IncomeStatementRow, shares: f64) -> Option<f64> {
     })
 }
 
-/// Top-level entry point: compute every metric for one symbol.
-pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>> {
-    let mut out: HashMap<MetricId, Option<f64>> = HashMap::with_capacity(MetricId::ALL.len());
-    for id in MetricId::ALL {
-        out.insert(*id, None);
-    }
+/// Precomputed inputs and cross-section values for metric compute.
+struct ComputeContext<'a> {
+    inputs: &'a ComputeInputs<'a>,
+    f: &'a Financials,
+    stmts: &'a StatementBundle,
+    chart: &'a ChartHistory,
+    closes_v: Vec<f64>,
+    income_a: Vec<&'a IncomeStatementRow>,
+    income_q: Vec<&'a IncomeStatementRow>,
+    balance_a: Vec<&'a BalanceSheetRow>,
+    cash_a: Vec<&'a CashflowRow>,
+    pat_ttm: Option<f64>,
+    revenue: f64,
+    shares: f64,
+    book_per_share: f64,
+    net_worth: f64,
+    cfo_ttm: f64,
+    fcf_ttm: f64,
+    eps: f64,
+    price: f64,
+    prev_close: f64,
+    mcap: f64,
+    ev: f64,
+    pe: f64,
+    pb: f64,
+    ps: f64,
+    profit_g_3y: Option<f64>,
+    ttm_ebit: Option<f64>,
+    fcf_3y: Option<f64>,
+}
 
+fn build_compute_context<'a>(inputs: &'a ComputeInputs<'a>) -> ComputeContext<'a> {
     let f = inputs.financials;
     let stmts = inputs.statements;
     let chart = inputs.chart_10y;
@@ -516,56 +542,86 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
     let cfo_ttm = resolve_cfo_ttm(f, &cashflow_q);
     let fcf_ttm = resolve_fcf_ttm(f, &cashflow_q, &cash_a);
     let eps = resolve_eps(f, pat_ttm, &income_q);
+    ComputeContext {
+        inputs,
+        f,
+        stmts,
+        chart,
+        closes_v,
+        income_a,
+        income_q,
+        balance_a,
+        cash_a,
+        pat_ttm,
+        revenue,
+        shares,
+        book_per_share,
+        net_worth,
+        cfo_ttm,
+        fcf_ttm,
+        eps,
+        price: 0.0,
+        prev_close: 0.0,
+        mcap: 0.0,
+        ev: 0.0,
+        pe: 0.0,
+        pb: 0.0,
+        ps: 0.0,
+        profit_g_3y: None,
+        ttm_ebit: None,
+        fcf_3y: None,
+    }
+}
 
-    // ============== Price & range ==============
-    let price = chart_last_close(chart)
+fn compute_price_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &mut ComputeContext<'_>) {
+    ctx.price = chart_last_close(ctx.chart)
         .or_else(|| {
-            closes_v
+            ctx.closes_v
                 .last()
                 .copied()
                 .filter(|p| *p > 0.0)
         })
-        .unwrap_or(f.previous_close);
-    let prev_close = chart_previous_close(chart)
-        .or_else(|| pos(f.previous_close))
+        .unwrap_or(ctx.f.previous_close);
+    ctx.prev_close = chart_previous_close(ctx.chart)
+        .or_else(|| pos(ctx.f.previous_close))
         .unwrap_or(0.0);
 
-    out.insert(MetricId::CurrentPrice, pos(price));
-    out.insert(MetricId::PreviousClose, pos(prev_close));
+    out.insert(MetricId::CurrentPrice, pos(ctx.price));
+    out.insert(MetricId::PreviousClose, pos(ctx.prev_close));
 
-    let (chart_hi, chart_lo) = chart_52w_range(chart);
+    let (chart_hi, chart_lo) = chart_52w_range(ctx.chart);
     let wk_hi = chart_hi
-        .or_else(|| pos(f.fifty_two_week_high))
+        .or_else(|| pos(ctx.f.fifty_two_week_high))
         .unwrap_or(0.0);
     let wk_lo = chart_lo
-        .or_else(|| pos(f.fifty_two_week_low))
+        .or_else(|| pos(ctx.f.fifty_two_week_low))
         .unwrap_or(0.0);
     out.insert(MetricId::FiftyTwoWeekHigh, pos(wk_hi));
     out.insert(MetricId::FiftyTwoWeekLow, pos(wk_lo));
-    if wk_hi > 0.0 && price > 0.0 {
+    if wk_hi > 0.0 && ctx.price > 0.0 {
         out.insert(
             MetricId::From52wHighPct,
-            Some(((wk_hi - price) / wk_hi) * 100.0),
+            Some(((wk_hi - ctx.price) / wk_hi) * 100.0),
         );
     }
-    if wk_lo > 0.0 && price > 0.0 {
+    if wk_lo > 0.0 && ctx.price > 0.0 {
         out.insert(
             MetricId::UpFrom52wLowPct,
-            Some(((price - wk_lo) / wk_lo) * 100.0),
+            Some(((ctx.price - wk_lo) / wk_lo) * 100.0),
         );
     }
-    let day_change = if f.regular_market_change_percent.abs() > 1e-9 {
-        Some(f.regular_market_change_percent * 100.0)
+    let day_change = if ctx.f.regular_market_change_percent.abs() > 1e-9 {
+        Some(ctx.f.regular_market_change_percent * 100.0)
     } else {
-        chart_day_change_pct(chart)
+        chart_day_change_pct(ctx.chart)
     };
     out.insert(MetricId::RegularMarketChangePercent, day_change.and_then(finite));
-    out.insert(MetricId::Volume, pos(f.regular_market_volume));
-    out.insert(MetricId::AverageVolume10Day, pos(f.average_volume_10_day));
+    out.insert(MetricId::Volume, pos(ctx.f.regular_market_volume));
+    out.insert(MetricId::AverageVolume10Day, pos(ctx.f.average_volume_10_day));
 
-    // 1y avg volume from chart
-    if chart.bars.len() >= TD_1Y {
-        let tail = &chart.bars[chart.bars.len() - TD_1Y..];
+    // 1y avg volume from ctx.chart
+    if ctx.chart.bars.len() >= TD_1Y {
+        let tail = &ctx.chart.bars[ctx.chart.bars.len() - TD_1Y..];
         let n = tail.len() as f64;
         let s: f64 = tail.iter().map(|b| b.volume).sum();
         if n > 0.0 {
@@ -573,146 +629,148 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
         }
     }
 
-    out.insert(MetricId::Return1wPct, roc_pct(&closes_v, TD_1W));
-    out.insert(MetricId::Return3mPct, roc_pct(&closes_v, TD_3M));
-    out.insert(MetricId::Return6mPct, roc_pct(&closes_v, TD_6M));
-    out.insert(MetricId::Return1yPct, roc_pct(&closes_v, TD_1Y));
-    out.insert(MetricId::Return3yCagrPct, cagr_from_closes(&closes_v, TD_3Y));
-    out.insert(MetricId::Return5yCagrPct, cagr_from_closes(&closes_v, TD_5Y));
+    out.insert(MetricId::Return1wPct, roc_pct(&ctx.closes_v, TD_1W));
+    out.insert(MetricId::Return3mPct, roc_pct(&ctx.closes_v, TD_3M));
+    out.insert(MetricId::Return6mPct, roc_pct(&ctx.closes_v, TD_6M));
+    out.insert(MetricId::Return1yPct, roc_pct(&ctx.closes_v, TD_1Y));
+    out.insert(MetricId::Return3yCagrPct, cagr_from_closes(&ctx.closes_v, TD_3Y));
+    out.insert(MetricId::Return5yCagrPct, cagr_from_closes(&ctx.closes_v, TD_5Y));
+}
 
-  // ============== Market structure ==============
-    let mcap = if f.market_cap > 0.0 {
-        f.market_cap
-    } else if price > 0.0 && shares > 0.0 {
-        price * shares
+fn compute_market_structure_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &mut ComputeContext<'_>) {
+    ctx.mcap = if ctx.f.market_cap > 0.0 {
+        ctx.f.market_cap
+    } else if ctx.price > 0.0 && ctx.shares > 0.0 {
+        ctx.price * ctx.shares
     } else {
         0.0
     };
-    out.insert(MetricId::MarketCap, pos(mcap));
-    let ev = if f.enterprise_value > 0.0 {
-        f.enterprise_value
-    } else if mcap > 0.0 {
-        (mcap + f.total_debt - f.total_cash).max(0.0)
+    out.insert(MetricId::MarketCap, pos(ctx.mcap));
+    ctx.ev = if ctx.f.enterprise_value > 0.0 {
+        ctx.f.enterprise_value
+    } else if ctx.mcap > 0.0 {
+        (ctx.mcap + ctx.f.total_debt - ctx.f.total_cash).max(0.0)
     } else {
-        enterprise_value(f)
+        enterprise_value(ctx.f)
     };
-    out.insert(MetricId::EnterpriseValue, pos(ev));
-    out.insert(MetricId::SharesOutstanding, pos(shares));
-    out.insert(MetricId::FaceValue, pos(f.face_value));
-    if revenue > 0.0 && mcap > 0.0 {
-        out.insert(MetricId::McapToSales, Some(mcap / revenue));
+    out.insert(MetricId::EnterpriseValue, pos(ctx.ev));
+    out.insert(MetricId::SharesOutstanding, pos(ctx.shares));
+    out.insert(MetricId::FaceValue, pos(ctx.f.face_value));
+    if ctx.revenue > 0.0 && ctx.mcap > 0.0 {
+        out.insert(MetricId::McapToSales, Some(ctx.mcap / ctx.revenue));
     }
-    if cfo_ttm.abs() > 1e-3 && mcap > 0.0 {
-        out.insert(MetricId::McapToCfo, Some(mcap / cfo_ttm));
-    }
-
-    // mcap to quarterly profit
-    let latest_q_pat = latest(&income_q).map(|r| r.net_income).unwrap_or(0.0);
-    if mcap > 0.0 && latest_q_pat.abs() > 1e-3 {
-        out.insert(MetricId::McapToQuarterlyProfit, Some(mcap / latest_q_pat));
+    if ctx.cfo_ttm.abs() > 1e-3 && ctx.mcap > 0.0 {
+        out.insert(MetricId::McapToCfo, Some(ctx.mcap / ctx.cfo_ttm));
     }
 
-    // ============== Valuation ==============
-    let pe = if f.pe_ratio > 0.0 {
-        f.pe_ratio
-    } else if eps > 0.0 && price > 0.0 {
-        price / eps
-    } else {
-        0.0
-    };
-    let pb = if f.price_to_book > 0.0 {
-        f.price_to_book
-    } else if book_per_share > 0.0 && price > 0.0 {
-        price / book_per_share
-    } else {
-        0.0
-    };
-    let ps = if f.price_to_sales > 0.0 {
-        f.price_to_sales
-    } else if revenue > 0.0 && shares > 0.0 && price > 0.0 {
-        price / (revenue / shares)
-    } else {
-        0.0
-    };
-    out.insert(MetricId::PeRatio, pos(pe));
-    out.insert(MetricId::ForwardPe, pos(f.forward_pe));
-    out.insert(MetricId::PriceToBook, pos(pb));
-    out.insert(MetricId::PriceToSales, pos(ps));
+    // ctx.mcap to quarterly profit
+    let latest_q_pat = latest(&ctx.income_q).map(|r| r.net_income).unwrap_or(0.0);
+    if ctx.mcap > 0.0 && latest_q_pat.abs() > 1e-3 {
+        out.insert(MetricId::McapToQuarterlyProfit, Some(ctx.mcap / latest_q_pat));
+    }
+}
 
-    let fcf_3y = fcf_3y_sum(&cash_a).map(|sum| sum / 3.0);
+fn compute_valuation_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &mut ComputeContext<'_>) {
+    ctx.pe = if ctx.f.pe_ratio > 0.0 {
+        ctx.f.pe_ratio
+    } else if ctx.eps > 0.0 && ctx.price > 0.0 {
+        ctx.price / ctx.eps
+    } else {
+        0.0
+    };
+    ctx.pb = if ctx.f.price_to_book > 0.0 {
+        ctx.f.price_to_book
+    } else if ctx.book_per_share > 0.0 && ctx.price > 0.0 {
+        ctx.price / ctx.book_per_share
+    } else {
+        0.0
+    };
+    ctx.ps = if ctx.f.price_to_sales > 0.0 {
+        ctx.f.price_to_sales
+    } else if ctx.revenue > 0.0 && ctx.shares > 0.0 && ctx.price > 0.0 {
+        ctx.price / (ctx.revenue / ctx.shares)
+    } else {
+        0.0
+    };
+    out.insert(MetricId::PeRatio, pos(ctx.pe));
+    out.insert(MetricId::ForwardPe, pos(ctx.f.forward_pe));
+    out.insert(MetricId::PriceToBook, pos(ctx.pb));
+    out.insert(MetricId::PriceToSales, pos(ctx.ps));
+
+    ctx.fcf_3y = fcf_3y_sum(&ctx.cash_a).map(|sum| sum / 3.0);
     out.insert(
         MetricId::PriceToFcf,
-        compute_price_to_fcf(price, shares, &cash_a, fcf_ttm),
+        compute_price_to_fcf(ctx.price, ctx.shares, &ctx.cash_a, ctx.fcf_ttm),
     );
 
     // P / (latest quarter EPS x 4)
-    if let Some(q_eps) = latest(&income_q).and_then(|r| eps_from_row(r, shares)) {
-        if price > 0.0 && q_eps > 0.0 {
-            out.insert(MetricId::PriceToQuarterlyEarning, Some(price / (q_eps * 4.0)));
+    if let Some(q_eps) = latest(&ctx.income_q).and_then(|r| eps_from_row(r, ctx.shares)) {
+        if ctx.price > 0.0 && q_eps > 0.0 {
+            out.insert(MetricId::PriceToQuarterlyEarning, Some(ctx.price / (q_eps * 4.0)));
         }
     }
 
-    let ev_to_ebitda = if ev > 0.0 && f.ebitda > 0.0 {
-        Some(ev / f.ebitda)
+    let ev_to_ebitda = if ctx.ev > 0.0 && ctx.f.ebitda > 0.0 {
+        Some(ctx.ev / ctx.f.ebitda)
     } else {
         None
     };
     out.insert(MetricId::EvToEbitda, ev_to_ebitda);
-    let ev_to_sales = if ev > 0.0 && revenue > 0.0 {
-        Some(ev / revenue)
+    let ev_to_sales = if ctx.ev > 0.0 && ctx.revenue > 0.0 {
+        Some(ctx.ev / ctx.revenue)
     } else {
         None
     };
     out.insert(MetricId::EvToSales, ev_to_sales);
 
     // Earnings yield (Greenblatt): trailing EBIT / EV.
-    let ttm_ebit = resolve_ttm_ebit(&income_q, &income_a, f);
-    if let (Some(ebit), ev_pos) = (ttm_ebit, ev) {
+    ctx.ttm_ebit = resolve_ttm_ebit(&ctx.income_q, &ctx.income_a, ctx.f);
+    if let (Some(ebit), ev_pos) = (ctx.ttm_ebit, ctx.ev) {
         if ebit > 0.0 && ev_pos > 0.0 {
             out.insert(MetricId::EarningsYieldPct, Some((ebit / ev_pos) * 100.0));
         }
     }
 
-    out.insert(MetricId::DividendYield, finite(f.dividend_yield));
+    out.insert(MetricId::DividendYield, finite(ctx.f.dividend_yield));
 
-    if pe > 0.0 && pb > 0.0 {
-        out.insert(MetricId::PbXPe, Some(pe * pb));
+    if ctx.pe > 0.0 && ctx.pb > 0.0 {
+        out.insert(MetricId::PbXPe, Some(ctx.pe * ctx.pb));
     }
 
     // Graham number = sqrt(22.5 * EPS * BV)
-    if eps > 0.0 && book_per_share > 0.0 {
+    if ctx.eps > 0.0 && ctx.book_per_share > 0.0 {
         out.insert(
             MetricId::GrahamNumber,
-            Some((22.5 * eps * book_per_share).sqrt()),
+            Some((22.5 * ctx.eps * ctx.book_per_share).sqrt()),
         );
     }
 
     // Intrinsic value (modified Graham): EPS x (8.5 + 2g) x 4.4 / Y
     // where g = 3y profit growth %, Y = current AAA yield (assume 7.0% for India).
-    let profit_g_3y = compute_profit_3y_cagr_pct(&income_a);
-    if eps > 0.0 {
-        if let Some(g) = profit_g_3y {
+    ctx.profit_g_3y = compute_profit_3y_cagr_pct(&ctx.income_a);
+    if ctx.eps > 0.0 {
+        if let Some(g) = ctx.profit_g_3y {
             let g_capped = g.min(20.0).max(-5.0);
             let aaa_yield = 7.0_f64;
-            let iv = eps * (8.5 + 2.0 * g_capped) * 4.4 / aaa_yield;
+            let iv = ctx.eps * (8.5 + 2.0 * g_capped) * 4.4 / aaa_yield;
             if iv.is_finite() && iv > 0.0 {
                 out.insert(MetricId::IntrinsicValue, Some(iv));
             }
         }
     }
 
-    // NCAVPS = (current assets - total liabilities) / shares — strict Graham form.
-    if let Some(b) = latest(&balance_a).filter(|b| balance_has_line_items(b)) {
-        if b.current_assets > 0.0 && shares > 0.0 {
+    // NCAVPS = (current assets - total liabilities) / ctx.shares — strict Graham form.
+    if let Some(b) = latest(&ctx.balance_a).filter(|b| balance_has_line_items(b)) {
+        if b.current_assets > 0.0 && ctx.shares > 0.0 {
             let nca = b.current_assets - b.total_liabilities;
-            out.insert(MetricId::Ncavps, Some(nca / shares));
+            out.insert(MetricId::Ncavps, Some(nca / ctx.shares));
         }
     }
 
     // Earning power = EBIT / Total Assets
-    if let Some(ebit) = ttm_ebit {
-        if let Some(b) = latest(&balance_a) {
-            if let Some(ta) = estimated_total_assets(b, net_worth, f.total_debt) {
+    if let Some(ebit) = ctx.ttm_ebit {
+        if let Some(b) = latest(&ctx.balance_a) {
+            if let Some(ta) = estimated_total_assets(b, ctx.net_worth, ctx.f.total_debt) {
                 if ta > 0.0 {
                     out.insert(MetricId::EarningPowerPct, Some((ebit / ta) * 100.0));
                 }
@@ -720,17 +778,17 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
         }
     }
 
-    out.insert(MetricId::EpsTtm, finite(eps).filter(|v| *v != 0.0));
-    out.insert(MetricId::BookValue, pos(book_per_share));
+    out.insert(MetricId::EpsTtm, finite(ctx.eps).filter(|v| *v != 0.0));
+    out.insert(MetricId::BookValue, pos(ctx.book_per_share));
 
-    // Book value per year: (equity / shares). Yahoo statements give totalStockholderEquity
+    // Book value per year: (equity / ctx.shares). Yahoo statements give totalStockholderEquity
     // in absolute terms; per-share book value = equity / shares_outstanding (assumed
-    // constant across history; the chart gives us share-count history if needed but
+    // constant across history; the ctx.chart gives us share-count history if needed but
     // it's noisy for India, so we approximate).
     let bv_year = |idx_back: usize| -> Option<f64> {
-        let row = nth_from_back(&balance_a, idx_back)?;
-        if row.total_equity > 0.0 && shares > 0.0 {
-            Some(row.total_equity / shares)
+        let row = nth_from_back(&ctx.balance_a, idx_back)?;
+        if row.total_equity > 0.0 && ctx.shares > 0.0 {
+            Some(row.total_equity / ctx.shares)
         } else {
             None
         }
@@ -744,59 +802,60 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
 
     // Historical PE medians: at each annual close near fiscal year end, divide by
     // diluted EPS that year. Yahoo annual income gives us fiscal year ends and EPS;
-    // chart gives us closes by date.
+    // ctx.chart gives us closes by date.
     out.insert(
         MetricId::HistoricalPe3y,
-        historical_pe_median(&income_a, &chart.bars, 3, shares),
+        historical_pe_median(&ctx.income_a, &ctx.chart.bars, 3, ctx.shares),
     );
     out.insert(
         MetricId::HistoricalPe5y,
-        historical_pe_median_fallback(&income_a, &chart.bars, 5, shares),
+        historical_pe_median_fallback(&ctx.income_a, &ctx.chart.bars, 5, ctx.shares),
     );
     out.insert(
         MetricId::HistoricalPe7y,
-        historical_pe_median_fallback(&income_a, &chart.bars, 7, shares),
+        historical_pe_median_fallback(&ctx.income_a, &ctx.chart.bars, 7, ctx.shares),
     );
+}
 
-    // ============== Income & margins ==============
-    out.insert(MetricId::RevenueTtm, pos(revenue));
-    out.insert(MetricId::SalesLastYear, latest(&income_a).map(|r| r.revenue).and_then(pos));
-    out.insert(MetricId::SalesLatestQuarter, latest(&income_q).map(|r| r.revenue).and_then(pos));
+fn compute_income_margin_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
+    out.insert(MetricId::RevenueTtm, pos(ctx.revenue));
+    out.insert(MetricId::SalesLastYear, latest(&ctx.income_a).map(|r| r.revenue).and_then(pos));
+    out.insert(MetricId::SalesLatestQuarter, latest(&ctx.income_q).map(|r| r.revenue).and_then(pos));
 
     out.insert(
         MetricId::SalesGrowthTtmPct,
-        growth_ttm_or_annual(&income_q, &income_a, |r| r.revenue),
+        growth_ttm_or_annual(&ctx.income_q, &ctx.income_a, |r| r.revenue),
     );
-    out.insert(MetricId::SalesGrowth3yCagrPct, annual_cagr_pct(&income_a, 3, |r| r.revenue));
+    out.insert(MetricId::SalesGrowth3yCagrPct, annual_cagr_pct(&ctx.income_a, 3, |r| r.revenue));
     out.insert(
         MetricId::SalesGrowth5yCagrPct,
-        annual_cagr_with_fallback(&income_a, 5, |r| r.revenue),
+        annual_cagr_with_fallback(&ctx.income_a, 5, |r| r.revenue),
     );
     out.insert(
         MetricId::SalesGrowth7yCagrPct,
-        annual_cagr_with_fallback(&income_a, 7, |r| r.revenue),
+        annual_cagr_with_fallback(&ctx.income_a, 7, |r| r.revenue),
     );
-    if quarterly_metrics_allowed(&income_q) {
+    if quarterly_metrics_allowed(&ctx.income_q) {
         out.insert(
             MetricId::YoyQuarterlySalesGrowthPct,
-            yoy_quarterly_pct(&income_q, |r| r.revenue),
+            yoy_quarterly_pct(&ctx.income_q, |r| r.revenue),
         );
     }
-    out.insert(MetricId::QoqSalesGrowthPct, qoq_pct(&income_q, |r| r.revenue));
+    out.insert(MetricId::QoqSalesGrowthPct, qoq_pct(&ctx.income_q, |r| r.revenue));
 
-    out.insert(MetricId::ProfitAfterTaxTtm, pat_ttm);
-    out.insert(MetricId::NetProfitLastYear, latest(&income_a).map(|r| r.net_income).and_then(finite));
+    out.insert(MetricId::ProfitAfterTaxTtm, ctx.pat_ttm);
+    out.insert(MetricId::NetProfitLastYear, latest(&ctx.income_a).map(|r| r.net_income).and_then(finite));
     out.insert(
         MetricId::ProfitAfterTaxLatestQuarter,
-        latest(&income_q).map(|r| r.net_income).and_then(finite),
+        latest(&ctx.income_q).map(|r| r.net_income).and_then(finite),
     );
     out.insert(
         MetricId::NetProfitPrecedingYearQuarter,
-        nth_from_back(&income_q, 3).map(|r| r.net_income).and_then(finite),
+        nth_from_back(&ctx.income_q, 3).map(|r| r.net_income).and_then(finite),
     );
 
     // PBT last year = operating income - interest (rough). Falls back to net income / (1 - effective tax).
-    if let Some(r) = latest(&income_a) {
+    if let Some(r) = latest(&ctx.income_a) {
         let pbt = if r.operating_income > 0.0 {
             // We don't track interest expense in IncomeStatementRow; approximate via net + tax.
             r.net_income.max(r.operating_income)
@@ -808,43 +867,43 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
 
     out.insert(
         MetricId::ProfitGrowthTtmPct,
-        growth_ttm_or_annual(&income_q, &income_a, |r| r.net_income),
+        growth_ttm_or_annual(&ctx.income_q, &ctx.income_a, |r| r.net_income),
     );
-    out.insert(MetricId::ProfitGrowth3yCagrPct, profit_g_3y);
+    out.insert(MetricId::ProfitGrowth3yCagrPct, ctx.profit_g_3y);
     out.insert(
         MetricId::ProfitGrowth5yCagrPct,
-        annual_cagr_with_fallback(&income_a, 5, |r| r.net_income),
+        annual_cagr_with_fallback(&ctx.income_a, 5, |r| r.net_income),
     );
-    if pe > 0.0 {
-        let peg = profit_g_3y
+    if ctx.pe > 0.0 {
+        let peg = ctx.profit_g_3y
             .filter(|g| *g > 0.0)
-            .map(|g| pe / g)
+            .map(|g| ctx.pe / g)
             .or_else(|| {
-                if f.earnings_growth > 0.0 {
-                    Some(pe / (f.earnings_growth * 100.0))
-                } else if f.revenue_growth > 0.0 {
-                    Some(pe / (f.revenue_growth * 100.0))
+                if ctx.f.earnings_growth > 0.0 {
+                    Some(ctx.pe / (ctx.f.earnings_growth * 100.0))
+                } else if ctx.f.revenue_growth > 0.0 {
+                    Some(ctx.pe / (ctx.f.revenue_growth * 100.0))
                 } else {
                     None
                 }
             });
         out.insert(MetricId::PegRatio, peg.filter(|v| v.is_finite() && *v > 0.0));
     }
-    if quarterly_metrics_allowed(&income_q) {
+    if quarterly_metrics_allowed(&ctx.income_q) {
         out.insert(
             MetricId::YoyQuarterlyProfitGrowthPct,
-            yoy_quarterly_pct(&income_q, |r| r.net_income),
+            yoy_quarterly_pct(&ctx.income_q, |r| r.net_income),
         );
     }
     out.insert(
         MetricId::QoqProfitGrowthPct,
-        qoq_pct(&income_q, |r| r.net_income),
+        qoq_pct(&ctx.income_q, |r| r.net_income),
     );
 
-    out.insert(MetricId::Ebitda, pos(f.ebitda));
-    let ebitda_margin = if f.ebitda_margins.abs() > 1e-9 {
-        f.ebitda_margins
-    } else if let Some(r) = latest(&income_a) {
+    out.insert(MetricId::Ebitda, pos(ctx.f.ebitda));
+    let ebitda_margin = if ctx.f.ebitda_margins.abs() > 1e-9 {
+        ctx.f.ebitda_margins
+    } else if let Some(r) = latest(&ctx.income_a) {
         if r.revenue > 0.0 && r.ebitda > 0.0 {
             r.ebitda / r.revenue
         } else {
@@ -856,14 +915,14 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
     out.insert(MetricId::EbitdaMargins, finite(ebitda_margin).filter(|v| *v != 0.0));
     out.insert(
         MetricId::OperatingProfitPrecedingYearQuarter,
-        nth_from_back(&income_q, 3)
+        nth_from_back(&ctx.income_q, 3)
             .map(|r| r.operating_income)
             .and_then(finite),
     );
     out.insert(MetricId::OpmPct, {
-        if f.operating_margins.abs() > 1e-9 {
-            finite(f.operating_margins)
-        } else if let Some(r) = latest(&income_a) {
+        if ctx.f.operating_margins.abs() > 1e-9 {
+            finite(ctx.f.operating_margins)
+        } else if let Some(r) = latest(&ctx.income_a) {
             if r.revenue > 0.0 && r.operating_income.abs() > 1e-9 {
                 Some(r.operating_income / r.revenue)
             } else {
@@ -875,36 +934,36 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
     });
 
     // NPMs
-    if let Some(r) = latest(&income_a) {
+    if let Some(r) = latest(&ctx.income_a) {
         if r.revenue > 0.0 {
             out.insert(MetricId::NpmLastYearPct, Some(r.net_income / r.revenue));
         }
     }
-    if let Some(r) = nth_from_back(&income_a, 1) {
+    if let Some(r) = nth_from_back(&ctx.income_a, 1) {
         if r.revenue > 0.0 {
             out.insert(MetricId::NpmPrecedingYearPct, Some(r.net_income / r.revenue));
         }
     }
-    if let Some(r) = latest(&income_q) {
+    if let Some(r) = latest(&ctx.income_q) {
         if r.revenue > 0.0 {
             out.insert(MetricId::NpmLatestQuarterPct, Some(r.net_income / r.revenue));
         }
     }
-    if let Some(r) = nth_from_back(&income_q, 1) {
+    if let Some(r) = nth_from_back(&ctx.income_q, 1) {
         if r.revenue > 0.0 {
             out.insert(MetricId::NpmPrecedingQuarterPct, Some(r.net_income / r.revenue));
         }
     }
-    if let Some(r) = nth_from_back(&income_q, 3) {
+    if let Some(r) = nth_from_back(&ctx.income_q, 3) {
         if r.revenue > 0.0 {
             out.insert(MetricId::NpmPrecedingYearQuarterPct, Some(r.net_income / r.revenue));
         }
     }
 
     out.insert(MetricId::GrossMargins, {
-        if f.gross_margins.abs() > 1e-9 {
-            finite(f.gross_margins)
-        } else if let Some(r) = latest(&income_a) {
+        if ctx.f.gross_margins.abs() > 1e-9 {
+            finite(ctx.f.gross_margins)
+        } else if let Some(r) = latest(&ctx.income_a) {
             if r.revenue > 0.0 && r.gross_profit.abs() > 1e-9 {
                 Some(r.gross_profit / r.revenue)
             } else {
@@ -917,18 +976,18 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
 
     // Depreciation TTM: not available directly in our IncomeStatementRow. Approximate as EBITDA - operating income.
     // This is best-effort; users who need precision should consult the statement bundle directly.
-    if let Some(dep) = ttm_depreciation(&income_q) {
+    if let Some(dep) = ttm_depreciation(&ctx.income_q) {
         out.insert(MetricId::DepreciationTtm, Some(dep));
     }
 
     // Interest expense TTM: prefer income quarterly, fall back to balance quarterly.
-    let interest_from_income = sum_last_4_quarters(&income_q, |r| r.interest_expense);
+    let interest_from_income = sum_last_4_quarters(&ctx.income_q, |r| r.interest_expense);
     if let Some(s) = interest_from_income.filter(|v| *v > 0.0) {
         out.insert(MetricId::InterestTtm, Some(s));
-    } else if let Some(s) = sum_last_4_quarters_income_interest(&income_q) {
+    } else if let Some(s) = sum_last_4_quarters_income_interest(&ctx.income_q) {
         out.insert(MetricId::InterestTtm, Some(s));
-    } else if !stmts.balance_quarterly.is_empty() {
-        let mut q: Vec<&BalanceSheetRow> = stmts.balance_quarterly.iter().collect();
+    } else if !ctx.stmts.balance_quarterly.is_empty() {
+        let mut q: Vec<&BalanceSheetRow> = ctx.stmts.balance_quarterly.iter().collect();
         q.sort_by_key(|r| r.end_ts.unwrap_or(0));
         if q.len() >= 4 {
             let s: f64 = q[q.len() - 4..].iter().map(|r| r.interest_expense).sum();
@@ -939,7 +998,7 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
     }
 
     // Tax TTM / annual: prefer income tax expense fields.
-    let tax_ttm = sum_last_4_quarters(&income_q, |r| {
+    let tax_ttm = sum_last_4_quarters(&ctx.income_q, |r| {
         if r.income_tax_expense > 0.0 {
             r.income_tax_expense
         } else {
@@ -947,7 +1006,7 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
         }
     });
     out.insert(MetricId::TaxTtm, tax_ttm);
-    if let Some(r) = latest(&income_a) {
+    if let Some(r) = latest(&ctx.income_a) {
         let tax = if r.income_tax_expense > 0.0 {
             r.income_tax_expense
         } else {
@@ -957,7 +1016,7 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
             out.insert(MetricId::TaxLastYear, Some(tax));
         }
     }
-    if let Some(r) = nth_from_back(&income_q, 3) {
+    if let Some(r) = nth_from_back(&ctx.income_q, 3) {
         let tax = if r.income_tax_expense > 0.0 {
             r.income_tax_expense
         } else {
@@ -969,9 +1028,9 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
     }
 
     // Average EBIT 5 years
-    if !income_a.is_empty() {
-        let take = income_a.len().min(5);
-        let tail = &income_a[income_a.len() - take..];
+    if !ctx.income_a.is_empty() {
+        let take = ctx.income_a.len().min(5);
+        let tail = &ctx.income_a[ctx.income_a.len() - take..];
         let mut sum = 0.0;
         let mut n = 0.0;
         for r in tail {
@@ -990,43 +1049,45 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
             out.insert(MetricId::AvgEbit5y, Some(sum / n));
         }
     }
+}
 
-    // ============== Returns / efficiency ==============
+fn compute_returns_efficiency_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
     out.insert(
         MetricId::ReturnOnEquity,
-        statement_roe(&income_a, &balance_a, net_worth).or_else(|| finite(f.return_on_equity)),
+        statement_roe(&ctx.income_a, &ctx.balance_a, ctx.net_worth).or_else(|| finite(ctx.f.return_on_equity)),
     );
     out.insert(
         MetricId::ReturnOnAssets,
-        statement_roa(&income_a, &balance_a, net_worth, f.total_debt)
-            .or(f.return_on_assets),
+        statement_roa(&ctx.income_a, &ctx.balance_a, ctx.net_worth, ctx.f.total_debt)
+            .or(ctx.f.return_on_assets),
     );
     out.insert(
         MetricId::ReturnOnCapitalEmployed,
-        resolve_roce(f, ttm_ebit, net_worth),
+        resolve_roce(ctx.f, ctx.ttm_ebit, ctx.net_worth),
     );
 
     // Weighted average ROE: sum(net_income) / avg(equity) over last N years.
     out.insert(
         MetricId::AvgRoe3y,
-        weighted_roe(&income_a, &balance_a, 3, net_worth),
+        weighted_roe(&ctx.income_a, &ctx.balance_a, 3, ctx.net_worth),
     );
     out.insert(
         MetricId::AvgRoe5y,
-        weighted_roe_with_fallback(&income_a, &balance_a, 5, net_worth),
+        weighted_roe_with_fallback(&ctx.income_a, &ctx.balance_a, 5, ctx.net_worth),
     );
+}
 
-    // ============== Balance sheet ==============
-    let latest_b = latest(&balance_a);
+fn compute_balance_sheet_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
+    let latest_b = latest(&ctx.balance_a);
     out.insert(
         MetricId::TotalAssets,
         latest_b
-            .and_then(|b| estimated_total_assets(b, net_worth, f.total_debt))
+            .and_then(|b| estimated_total_assets(b, ctx.net_worth, ctx.f.total_debt))
             .and_then(pos),
     );
-    out.insert(MetricId::NetWorth, pos(net_worth));
-    out.insert(MetricId::TotalDebt, pos(f.total_debt));
-    out.insert(MetricId::DebtToEquity, finite(f.debt_to_equity));
+    out.insert(MetricId::NetWorth, pos(ctx.net_worth));
+    out.insert(MetricId::TotalDebt, pos(ctx.f.total_debt));
+    out.insert(MetricId::DebtToEquity, finite(ctx.f.debt_to_equity));
     if let Some(b) = latest_b {
         if b.current_liabilities > 0.0 {
             out.insert(MetricId::CurrentRatio, Some(b.current_assets / b.current_liabilities));
@@ -1037,15 +1098,15 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
         }
     }
     if out.get(&MetricId::CurrentRatio).copied().flatten().is_none() {
-        out.insert(MetricId::CurrentRatio, f.current_ratio);
+        out.insert(MetricId::CurrentRatio, ctx.f.current_ratio);
     }
     if out.get(&MetricId::QuickRatio).copied().flatten().is_none() {
-        out.insert(MetricId::QuickRatio, f.quick_ratio);
+        out.insert(MetricId::QuickRatio, ctx.f.quick_ratio);
     }
     out.insert(MetricId::Inventory, latest_b.map(|r| r.inventory).and_then(pos));
 
     let wc_year = |idx_back: usize| -> Option<f64> {
-        nth_from_back(&balance_a, idx_back)
+        nth_from_back(&ctx.balance_a, idx_back)
             .filter(|b| balance_has_line_items(b))
             .and_then(working_capital)
     };
@@ -1059,7 +1120,7 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
 
     if let (Some(b), Some(rev)) = (
         latest_b.filter(|b| balance_has_line_items(b)),
-        latest(&income_a).map(|r| r.revenue),
+        latest(&ctx.income_a).map(|r| r.revenue),
     ) {
         if rev > 0.0 {
             let wc = b.current_assets - b.current_liabilities;
@@ -1068,27 +1129,34 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
                 MetricId::WorkingCapitalToSalesPct,
                 Some(((b.current_assets - b.current_liabilities) / rev) * 100.0),
             );
-            out.insert(
-                MetricId::DaysReceivableOutstanding,
-                if b.net_receivables > 0.0 {
-                    Some(b.net_receivables / rev * 365.0)
-                } else {
-                    None
-                },
-            );
+            if let Some(i) = latest(&ctx.income_a) {
+                out.insert(MetricId::DaysReceivableOutstanding, receivable_days(b, i));
+                out.insert(MetricId::DaysInventoryOutstanding, inventory_days(b, i));
+            }
         }
     }
 
+    if ctx.balance_a.len() >= 3 && ctx.income_a.len() >= 3 {
+        out.insert(
+            MetricId::DaysReceivableChange3y,
+            days_change_3y(&ctx.balance_a, &ctx.income_a, receivable_days),
+        );
+        out.insert(
+            MetricId::DaysInventoryChange3y,
+            days_change_3y(&ctx.balance_a, &ctx.income_a, inventory_days),
+        );
+    }
+
     // 3y avg working capital days
-    if balance_a.len() >= 3 && income_a.len() >= 3 {
+    if ctx.balance_a.len() >= 3 && ctx.income_a.len() >= 3 {
         let mut acc = 0.0;
         let mut n = 0.0;
         for i in 1..=3 {
-            let bi = balance_a.len().checked_sub(i);
-            let ri = income_a.len().checked_sub(i);
+            let bi = ctx.balance_a.len().checked_sub(i);
+            let ri = ctx.income_a.len().checked_sub(i);
             if let (Some(bi), Some(ri)) = (bi, ri) {
-                let b = balance_a[bi];
-                let r = income_a[ri];
+                let b = ctx.balance_a[bi];
+                let r = ctx.income_a[ri];
                 if r.revenue > 0.0 {
                     let wc = b.current_assets - b.current_liabilities;
                     acc += wc / r.revenue * 365.0;
@@ -1102,26 +1170,26 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
     }
 
     // Financial leverage = avg total assets / net worth
-    if net_worth > 0.0 {
+    if ctx.net_worth > 0.0 {
         let mut ta_samples = Vec::new();
-        if balance_a.is_empty() {
-            ta_samples.push(net_worth + f.total_debt.max(0.0));
+        if ctx.balance_a.is_empty() {
+            ta_samples.push(ctx.net_worth + ctx.f.total_debt.max(0.0));
         } else {
-            for b in balance_a.iter().rev().take(2) {
-                if let Some(ta) = estimated_total_assets(b, net_worth, f.total_debt) {
+            for b in ctx.balance_a.iter().rev().take(2) {
+                if let Some(ta) = estimated_total_assets(b, ctx.net_worth, ctx.f.total_debt) {
                     ta_samples.push(ta);
                 }
             }
         }
         if !ta_samples.is_empty() {
             let avg_ta: f64 = ta_samples.iter().sum::<f64>() / ta_samples.len() as f64;
-            out.insert(MetricId::FinancialLeverage, Some(avg_ta / net_worth));
+            out.insert(MetricId::FinancialLeverage, Some(avg_ta / ctx.net_worth));
         }
     }
 
     // Interest coverage = EBIT / interest expense (latest annual income preferred).
-    if let Some(ebit) = latest(&income_a).and_then(ebit_from_income) {
-        let interest = latest(&income_a)
+    if let Some(ebit) = latest(&ctx.income_a).and_then(ebit_from_income) {
+        let interest = latest(&ctx.income_a)
             .map(|r| r.interest_expense)
             .filter(|v| *v > 0.0)
             .or_else(|| latest_b.map(|b| b.interest_expense).filter(|v| *v > 0.0));
@@ -1129,63 +1197,76 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
             out.insert(MetricId::InterestCoverageRatio, Some(ebit / interest));
         }
     }
+}
 
-    // ============== Cash flow ==============
-    out.insert(MetricId::OperatingCashflowTtm, finite(cfo_ttm));
-    out.insert(MetricId::FreeCashflowLastYear, latest(&cash_a).map(|r| r.free_cashflow).and_then(finite));
-    out.insert(MetricId::FreeCashflowTtm, finite(fcf_ttm));
-    if let Some(sum) = fcf_3y_sum(&cash_a) {
+fn compute_cashflow_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
+    out.insert(
+        MetricId::CumulativeCfoPat3y,
+        stocker_core::cumulative_cfo_pat_for_bundle(ctx.stmts, 3),
+    );
+    out.insert(
+        MetricId::CumulativeCfoPat5y,
+        stocker_core::cumulative_cfo_pat_for_bundle(ctx.stmts, 5),
+    );
+    out.insert(MetricId::CfoPatLatestYear, cfo_pat_latest_year(&ctx.income_a, &ctx.cash_a));
+    out.insert(MetricId::OperatingCashflowTtm, finite(ctx.cfo_ttm));
+    out.insert(MetricId::FreeCashflowLastYear, latest(&ctx.cash_a).map(|r| r.free_cashflow).and_then(finite));
+    out.insert(MetricId::FreeCashflowTtm, finite(ctx.fcf_ttm));
+    if let Some(sum) = fcf_3y_sum(&ctx.cash_a) {
         out.insert(MetricId::FreeCashflow3ySum, Some(sum));
     }
-    if !cash_a.is_empty() {
-        let take = cash_a.len().min(5);
-        let s: f64 = cash_a[cash_a.len() - take..]
+    if !ctx.cash_a.is_empty() {
+        let take = ctx.cash_a.len().min(5);
+        let s: f64 = ctx.cash_a[ctx.cash_a.len() - take..]
             .iter()
             .map(|r| r.free_cashflow)
             .sum();
         out.insert(MetricId::FreeCashflow5ySum, Some(s));
     }
+}
 
-    // ============== Technical ==============
-    out.insert(MetricId::Dma50, sma_last(&closes_v, 50));
-    out.insert(MetricId::Dma200, sma_last(&closes_v, 200));
-    let (macd_now, macd_sig_now, _) = macd_components(&closes_v);
+fn compute_technical_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
+    out.insert(MetricId::Dma50, sma_last(&ctx.closes_v, 50));
+    out.insert(MetricId::Dma200, sma_last(&ctx.closes_v, 200));
+    let (macd_now, macd_sig_now, _) = macd_components(&ctx.closes_v);
     out.insert(MetricId::Macd, macd_now);
     out.insert(MetricId::MacdSignal, macd_sig_now);
-    if closes_v.len() >= 36 {
-        let prev_closes = &closes_v[..closes_v.len() - 1];
+    if ctx.closes_v.len() >= 36 {
+        let prev_closes = &ctx.closes_v[..ctx.closes_v.len() - 1];
         let (m, s, _) = macd_components(prev_closes);
         out.insert(MetricId::MacdPreviousDay, m);
         out.insert(MetricId::MacdSignalPreviousDay, s);
     }
-    out.insert(MetricId::Rsi14, stocker_core::technical_analysis::rsi14(&closes_v));
+    out.insert(MetricId::Rsi14, stocker_core::technical_analysis::rsi14(&ctx.closes_v));
+}
 
-    // ============== Composite scores ==============
+fn compute_composite_scores(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
+    let latest_b = latest(&ctx.balance_a);
     out.insert(
         MetricId::AltmanZScore,
-        altman_z(latest(&balance_a), latest(&income_a), mcap, net_worth),
+        altman_z(latest(&ctx.balance_a), latest(&ctx.income_a), ctx.mcap, ctx.net_worth),
     );
-    let piotroski = if income_a.len() >= 2 && balance_a.len() >= 2 && !cash_a.is_empty() {
-        piotroski_f(&income_a, &balance_a, &cash_a)
+    let piotroski = if ctx.income_a.len() >= 2 && ctx.balance_a.len() >= 2 && !ctx.cash_a.is_empty() {
+        piotroski_f(&ctx.income_a, &ctx.balance_a, &ctx.cash_a)
     } else {
         None
     };
     out.insert(MetricId::PiotroskiFScore, piotroski);
-    let g_factor = if income_a.len() >= 2 && balance_a.len() >= 2 {
-        let computed_roe = statement_roe(&income_a, &balance_a, net_worth)
-            .or_else(|| finite(f.return_on_equity));
-        g_factor(&income_a, &balance_a, &cash_a, computed_roe)
+    let g_factor = if ctx.income_a.len() >= 2 && ctx.balance_a.len() >= 2 {
+        let computed_roe = statement_roe(&ctx.income_a, &ctx.balance_a, ctx.net_worth)
+            .or_else(|| finite(ctx.f.return_on_equity));
+        g_factor(&ctx.income_a, &ctx.balance_a, &ctx.cash_a, computed_roe)
     } else {
         None
     };
     out.insert(MetricId::GFactor, g_factor);
 
     // CROIC = 3y avg FCF / Invested Capital (NW + Debt - Cash)
-    if let (Some(b), Some(avg_fcf)) = (latest_b, fcf_3y) {
+    if let (Some(b), Some(avg_fcf)) = (latest_b, ctx.fcf_3y) {
         let equity = if b.total_equity > 0.0 {
             b.total_equity
         } else {
-            net_worth
+            ctx.net_worth
         };
         let invested = equity + b.total_debt - b.cash;
         if invested > 0.0 {
@@ -1194,18 +1275,18 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
     }
 
     // Debt capacity: (EBITDA × 5 − TotalDebt) / NetWorth
-    if let Some(ebitda) = pos(f.ebitda) {
-        if net_worth > 0.0 {
-            let capacity = (ebitda * 5.0 - f.total_debt) / net_worth;
+    if let Some(ebitda) = pos(ctx.f.ebitda) {
+        if ctx.net_worth > 0.0 {
+            let capacity = (ebitda * 5.0 - ctx.f.total_debt) / ctx.net_worth;
             out.insert(MetricId::DebtCapacity, finite(capacity));
         }
-        if mcap > 0.0 {
-            out.insert(MetricId::McapToDebtCapacity, Some(mcap / (ebitda * 5.0)));
+        if ctx.mcap > 0.0 {
+            out.insert(MetricId::McapToDebtCapacity, Some(ctx.mcap / (ebitda * 5.0)));
         }
     }
 
     // Borrow some peer-quote enrichment if upstream had it.
-    if let Some(p) = inputs.peer_quote {
+    if let Some(p) = ctx.inputs.peer_quote {
         if out.get(&MetricId::PeRatio).copied().flatten().is_none() {
             out.insert(MetricId::PeRatio, pos(p.pe_ratio));
         }
@@ -1215,8 +1296,26 @@ pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>>
     }
 
     // Profile is referenced for `face_value` enrichment hooks in future.
-    let _ = inputs.asset_profile;
+    let _ = ctx.inputs.asset_profile;
+}
 
+/// Top-level entry point: compute every metric for one symbol.
+pub fn compute_all(inputs: &ComputeInputs<'_>) -> HashMap<MetricId, Option<f64>> {
+    let mut out: HashMap<MetricId, Option<f64>> = HashMap::with_capacity(MetricId::ALL.len());
+    for id in MetricId::ALL {
+        out.insert(*id, None);
+    }
+
+    let mut ctx = build_compute_context(inputs);
+    compute_price_metrics(&mut out, &mut ctx);
+    compute_market_structure_metrics(&mut out, &mut ctx);
+    compute_valuation_metrics(&mut out, &mut ctx);
+    compute_income_margin_metrics(&mut out, &mut ctx);
+    compute_returns_efficiency_metrics(&mut out, &mut ctx);
+    compute_balance_sheet_metrics(&mut out, &mut ctx);
+    compute_cashflow_metrics(&mut out, &mut ctx);
+    compute_technical_metrics(&mut out, &ctx);
+    compute_composite_scores(&mut out, &ctx);
     out
 }
 
@@ -1270,7 +1369,7 @@ fn annual_cagr_pct<F: Fn(&IncomeStatementRow) -> f64>(
     }
     let last = f(rows[rows.len() - 1]);
     let first = f(rows[rows.len() - 1 - years]);
-    cagr_pct(first, last, years as f64)
+    cagr(first, last, years as f64)
 }
 
 /// CAGR for a target horizon (5Y / 7Y), falling back to shorter spans when Yahoo only returns ~4 annual periods.
@@ -1658,7 +1757,7 @@ mod tests {
 
     #[test]
     fn cagr_pct_basics() {
-        let v = cagr_pct(100.0, 200.0, 5.0).unwrap();
+        let v = cagr(100.0, 200.0, 5.0).unwrap();
         assert!((v - 14.87).abs() < 0.5);
     }
 
@@ -1691,9 +1790,9 @@ mod tests {
 
     #[test]
     fn median_basics() {
-        assert_eq!(median(vec![1.0, 3.0, 2.0]), Some(2.0));
-        assert_eq!(median(vec![1.0, 2.0, 3.0, 4.0]), Some(2.5));
-        assert_eq!(median(vec![]), None);
+        assert_eq!(median([1.0, 3.0, 2.0]), Some(2.0));
+        assert_eq!(median([1.0, 2.0, 3.0, 4.0]), Some(2.5));
+        assert_eq!(median(std::iter::empty::<f64>()), None);
     }
 
     #[test]
@@ -1775,6 +1874,8 @@ mod tests {
             depreciation: 0.0,
             net_income: 150.0,
             diluted_eps: None,
+            other_income_expense: 0.0,
+            net_interest_income: 0.0,
         };
         assert_eq!(ebit_from_income(&row), Some(250.0));
     }
@@ -1797,6 +1898,8 @@ mod tests {
                 depreciation: 0.0,
                 net_income: 10.0,
                 diluted_eps: None,
+                other_income_expense: 0.0,
+                net_interest_income: 0.0,
             })
             .collect();
         let refs: Vec<&IncomeStatementRow> = rows.iter().collect();
@@ -1822,6 +1925,8 @@ mod tests {
             depreciation: 0.0,
             net_income: 100.0,
             diluted_eps: None,
+            other_income_expense: 0.0,
+            net_interest_income: 0.0,
         };
         assert_eq!(eps_from_row(&row, 10.0), Some(10.0));
     }
@@ -1952,5 +2057,80 @@ mod tests {
         let b_refs: Vec<&BalanceSheetRow> = balance.iter().collect();
         let roa = statement_roa(&i_refs, &b_refs, 0.0, 0.0).unwrap();
         assert!((roa - 0.1111).abs() < 0.001);
+    }
+
+    #[test]
+    fn receivable_and_inventory_days_helpers() {
+        let b = BalanceSheetRow {
+            net_receivables: 100.0,
+            inventory: 50.0,
+            ..BalanceSheetRow::default()
+        };
+        let i = IncomeStatementRow {
+            revenue: 365.0,
+            cost_of_revenue: 182.5,
+            ..IncomeStatementRow::default()
+        };
+        assert!((receivable_days(&b, &i).unwrap() - 100.0).abs() < 0.01);
+        assert!((inventory_days(&b, &i).unwrap() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn days_change_3y_positive_when_days_rise() {
+        let balance = vec![
+            BalanceSheetRow {
+                end_date_fmt: "2022".into(),
+                net_receivables: 50.0,
+                ..BalanceSheetRow::default()
+            },
+            BalanceSheetRow {
+                end_date_fmt: "2023".into(),
+                net_receivables: 60.0,
+                ..BalanceSheetRow::default()
+            },
+            BalanceSheetRow {
+                end_date_fmt: "2024".into(),
+                net_receivables: 100.0,
+                ..BalanceSheetRow::default()
+            },
+        ];
+        let income = vec![
+            IncomeStatementRow {
+                end_date_fmt: "2022".into(),
+                revenue: 365.0,
+                ..IncomeStatementRow::default()
+            },
+            IncomeStatementRow {
+                end_date_fmt: "2023".into(),
+                revenue: 365.0,
+                ..IncomeStatementRow::default()
+            },
+            IncomeStatementRow {
+                end_date_fmt: "2024".into(),
+                revenue: 365.0,
+                ..IncomeStatementRow::default()
+            },
+        ];
+        let b_refs: Vec<&BalanceSheetRow> = balance.iter().collect();
+        let i_refs: Vec<&IncomeStatementRow> = income.iter().collect();
+        let chg = days_change_3y(&b_refs, &i_refs, receivable_days).unwrap();
+        assert!((chg - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cfo_pat_latest_year_ratio() {
+        let income = vec![IncomeStatementRow {
+            end_date_fmt: "2024".into(),
+            net_income: 100.0,
+            ..IncomeStatementRow::default()
+        }];
+        let cash = vec![CashflowRow {
+            end_date_fmt: "2024".into(),
+            operating_cashflow: 120.0,
+            ..CashflowRow::default()
+        }];
+        let i_refs: Vec<&IncomeStatementRow> = income.iter().collect();
+        let c_refs: Vec<&CashflowRow> = cash.iter().collect();
+        assert!((cfo_pat_latest_year(&i_refs, &c_refs).unwrap() - 1.2).abs() < 0.001);
     }
 }

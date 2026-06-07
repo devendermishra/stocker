@@ -15,6 +15,7 @@ mod report;
 mod routes;
 mod screener;
 mod screener_api;
+mod stocks;
 mod types;
 
 fn main() {

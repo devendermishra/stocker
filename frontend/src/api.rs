@@ -27,7 +27,7 @@ pub async fn load_research_report(symbol: String) -> Result<ResearchReport, Stri
 
 #[cfg(feature = "desktop")]
 pub async fn load_research_report(symbol: String) -> Result<ResearchReport, String> {
-    stocker_core::build_research_report(&symbol)
+    stocker_core::build_research_report(&symbol, None, None)
         .await
         .map_err(|e| e.to_string())
 }

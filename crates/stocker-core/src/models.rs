@@ -98,6 +98,145 @@ pub struct NewsItem {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AnalystRecommendationPeriod {
+    pub period: String,
+    pub strong_buy: u32,
+    pub buy: u32,
+    pub hold: u32,
+    pub sell: u32,
+    pub strong_sell: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AnalystRecommendations {
+    pub trend: Vec<AnalystRecommendationPeriod>,
+    /// Net bullish score: (strong_buy + buy) - (sell + strong_sell) for latest month
+    pub net_bullish_score: i32,
+    pub consensus_label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct InsiderTransaction {
+    pub filer_name: String,
+    pub transaction_text: String,
+    pub shares: f64,
+    pub value: Option<f64>,
+    pub start_date: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct InstitutionalHolder {
+    pub organization: String,
+    pub pct_held: f64,
+    pub position: f64,
+    pub value: f64,
+    pub report_date: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct MarketSignals {
+    pub analyst: AnalystRecommendations,
+    pub insider_transactions: Vec<InsiderTransaction>,
+    pub institutional_holders: Vec<InstitutionalHolder>,
+    pub narrative: String,
+}
+
+/// Optional banking-specific metrics (typically from annual report / investor presentation).
+///
+/// Stocker does not scrape NSE/RBI for these; instead they are intended to be
+/// loaded from a user-provided local CSV (see `STOCKER_BANK_METRICS_CSV`).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct BankingMetrics {
+    /// Gross NPA %, e.g. 2.34 for 2.34%
+    pub gnpa_pct: Option<f64>,
+    /// Net NPA %, e.g. 0.65 for 0.65%
+    pub nnpa_pct: Option<f64>,
+    /// Provision coverage ratio %, e.g. 78.0
+    pub provision_coverage_ratio_pct: Option<f64>,
+    pub credit_growth_yoy_pct: Option<f64>,
+    pub deposit_growth_yoy_pct: Option<f64>,
+    pub casa_ratio_pct: Option<f64>,
+    pub as_of_date: Option<String>,
+    pub source: Option<String>,
+}
+
+/// Lightweight screener metrics merged into research reports when DB snapshot is fresh.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ScreenerMetricSnapshot {
+    pub operating_cashflow_ttm: Option<f64>,
+    pub profit_after_tax_ttm: Option<f64>,
+    pub interest_coverage_ratio: Option<f64>,
+    pub days_receivable_outstanding: Option<f64>,
+    pub days_inventory_outstanding: Option<f64>,
+    pub days_receivable_change_3y: Option<f64>,
+    pub days_inventory_change_3y: Option<f64>,
+    pub cumulative_cfo_pat_3y: Option<f64>,
+    pub cumulative_cfo_pat_5y: Option<f64>,
+    pub return_on_capital_employed: Option<f64>,
+    pub debt_to_equity: Option<f64>,
+    pub piotroski_f_score: Option<f64>,
+    pub altman_z_score: Option<f64>,
+    pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditStatus {
+    Pass,
+    Watch,
+    Fail,
+    InsufficientData,
+}
+
+impl AuditStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Watch => "watch",
+            Self::Fail => "fail",
+            Self::InsufficientData => "insufficient_data",
+        }
+    }
+}
+
+impl std::fmt::Display for AuditStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AuditChecklistItem {
+    pub metric: String,
+    pub value: Option<f64>,
+    pub value_display: String,
+    pub benchmark: String,
+    pub status: AuditStatus,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct FinancialStrengthAudit {
+    pub earnings_quality_score: f64,
+    pub balance_sheet_score: f64,
+    pub overall_strength_score: f64,
+    pub checklist: Vec<AuditChecklistItem>,
+    pub red_flags: Vec<String>,
+    pub strengths: Vec<String>,
+    pub interpretation: String,
+    pub confidence: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ActionGuidance {
+    pub if_holding: String,
+    pub if_considering_entry: String,
+    pub wait_for_events: Vec<String>,
+    pub headline: String,
+    pub rationale_bullets: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AssetProfile {
     pub long_name: Option<String>,
     pub sector: Option<String>,
@@ -108,6 +247,7 @@ pub struct AssetProfile {
     #[serde(default)]
     pub country: Option<String>,
     #[serde(default)]
+    /// Always `NSE` or `BSE` when populated (Yahoo NSI/YHD codes are normalized in the fetcher).
     pub exchange: Option<String>,
     #[serde(default)]
     pub currency: Option<String>,
@@ -157,6 +297,10 @@ pub struct CashFlowQuality {
     pub cfo_vs_ebitda_ratio: Option<f64>,
     pub cash_conversion_ratio: Option<f64>,
     pub capex_requirement_ratio: Option<f64>,
+    #[serde(default)]
+    pub cumulative_cfo_pat_3y: Option<f64>,
+    #[serde(default)]
+    pub cumulative_cfo_pat_5y: Option<f64>,
     pub narrative: String,
 }
 
@@ -357,6 +501,10 @@ pub struct IncomeStatementRow {
     pub depreciation: f64,
     pub net_income: f64,
     pub diluted_eps: Option<f64>,
+    #[serde(default)]
+    pub other_income_expense: f64,
+    #[serde(default)]
+    pub net_interest_income: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -375,6 +523,10 @@ pub struct BalanceSheetRow {
     pub net_receivables: f64,
     #[serde(default)]
     pub retained_earnings: f64,
+    #[serde(default)]
+    pub goodwill: f64,
+    #[serde(default)]
+    pub intangible_assets: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -596,5 +748,7 @@ pub struct ResearchSummary {
     pub key_negatives: Vec<String>,
     pub key_monitorables: Vec<String>,
     pub suggested_action: String,
+    #[serde(default)]
+    pub action_guidance: ActionGuidance,
     pub disclaimer: String,
 }

@@ -42,6 +42,15 @@ const BALANCE_KEYS: &[&str] = &[
     "OtherShortTermInvestments",
     "CashCashEquivalentsAndShortTermInvestments",
     "RetainedEarnings",
+    "Goodwill",
+    "GoodwillAndOtherIntangibleAssets",
+    "OtherIntangibleAssets",
+];
+
+const INCOME_EXTRA_KEYS: &[&str] = &[
+    "OtherIncomeExpense",
+    "NetInterestIncome",
+    "InterestIncome",
 ];
 
 const CASHFLOW_KEYS: &[&str] = &[
@@ -170,11 +179,13 @@ async fn fetch_period_maps(
     let period1 = period_start_secs(12);
     let period2 = chrono::Utc::now().timestamp();
     let fin_type = build_type_param(period, FINANCIALS_KEYS);
+    let fin_extra_type = build_type_param(period, INCOME_EXTRA_KEYS);
     let bal_type = build_type_param(period, BALANCE_KEYS);
     let cf_type = build_type_param(period, CASHFLOW_KEYS);
 
-    let (fin, bal, cf) = tokio::join!(
+    let (fin, fin_extra, bal, cf) = tokio::join!(
         fetch_timeseries(client, symbol, period, &fin_type, period1, period2),
+        fetch_timeseries(client, symbol, period, &fin_extra_type, period1, period2),
         fetch_timeseries(client, symbol, period, &bal_type, period1, period2),
         fetch_timeseries(client, symbol, period, &cf_type, period1, period2),
     );
@@ -184,6 +195,11 @@ async fn fetch_period_maps(
         merge_period_maps(&mut merged, parse_timeseries_response(&v, period));
     } else if let Err(e) = fin {
         log::warn!("FTS financials {period} for {symbol}: {e}");
+    }
+    if let Ok(v) = fin_extra {
+        merge_period_maps(&mut merged, parse_timeseries_response(&v, period));
+    } else if let Err(e) = fin_extra {
+        log::warn!("FTS income extras {period} for {symbol}: {e}");
     }
     if let Ok(v) = bal {
         merge_period_maps(&mut merged, parse_timeseries_response(&v, period));
@@ -247,6 +263,8 @@ fn income_from_period(ts: i64, p: &TimeseriesPeriod) -> IncomeStatementRow {
         ]),
         net_income: get_f64(p, &["netIncome"]),
         diluted_eps: get_opt_f64(p, &["dilutedEPS"]),
+        other_income_expense: get_f64(p, &["otherIncomeExpense"]),
+        net_interest_income: get_f64(p, &["netInterestIncome", "interestIncome"]),
     }
 }
 
@@ -271,6 +289,9 @@ fn balance_from_period(ts: i64, p: &TimeseriesPeriod) -> BalanceSheetRow {
         net_receivables: get_f64(p, &["accountsReceivable"])
             .max(get_f64(p, &["grossAccountsReceivable"])),
         retained_earnings: get_f64(p, &["retainedEarnings"]),
+        goodwill: get_f64(p, &["goodwill"]),
+        intangible_assets: get_f64(p, &["otherIntangibleAssets"])
+            .max(get_f64(p, &["goodwillAndOtherIntangibleAssets"]) - get_f64(p, &["goodwill"])),
     }
 }
 

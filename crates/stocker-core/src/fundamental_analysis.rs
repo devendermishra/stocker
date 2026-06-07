@@ -1,30 +1,9 @@
+use crate::math::{cagr, pct_change};
 use crate::models::{
-    AnnualReport, Financials, FundamentalAnalysis, FundamentalSection, StatementBundle,
+    AnnualReport, BalanceSheetRow, Financials, FundamentalAnalysis, FundamentalSection,
+    IncomeStatementRow, StatementBundle,
 };
-
-fn pct_change(cur: f64, prev: f64) -> Option<f64> {
-    if !prev.is_finite() || prev.abs() < 1e-9 {
-        return None;
-    }
-    Some(((cur / prev) - 1.0) * 100.0)
-}
-
-fn cagr(start: f64, end: f64, years: f64) -> Option<f64> {
-    if years <= 0.0 || start <= 0.0 || end <= 0.0 {
-        return None;
-    }
-    Some(((end / start).powf(1.0 / years) - 1.0) * 100.0)
-}
-
-fn sort_income_annual(bundle: &StatementBundle) -> Vec<&crate::models::IncomeStatementRow> {
-    let mut v: Vec<_> = bundle.income_annual.iter().collect();
-    v.sort_by(|a, b| {
-        let ta = a.end_ts.unwrap_or(0);
-        let tb = b.end_ts.unwrap_or(0);
-        tb.cmp(&ta)
-    });
-    v
-}
+use crate::statements::{income_annual_desc, sort_owned_desc};
 
 fn line(label: &str, val: Option<f64>, suffix: &str) -> (String, String) {
     match val {
@@ -40,35 +19,34 @@ fn line(label: &str, val: Option<f64>, suffix: &str) -> (String, String) {
     }
 }
 
-pub fn build_fundamental_analysis(
-    bundle: &StatementBundle,
-    financials: &Financials,
-    _annual_reports: &[AnnualReport],
-) -> FundamentalAnalysis {
-    let inc = sort_income_annual(bundle);
-    let conf = if inc.len() >= 3 {
-        "High"
-    } else if inc.len() >= 1 {
-        "Medium"
+fn fundamental_confidence(inc_len: usize) -> String {
+    if inc_len >= 3 {
+        "High".to_string()
+    } else if inc_len >= 1 {
+        "Medium".to_string()
     } else {
-        "Low"
+        "Low".to_string()
     }
-    .to_string();
+}
 
-    // Growth
+fn fundamental_growth_section(
+    inc: &[&IncomeStatementRow],
+    financials: &Financials,
+    confidence: &str,
+) -> FundamentalSection {
     let rev_yoy = inc
-        .get(0)
+        .first()
         .zip(inc.get(1))
         .and_then(|(a, b)| pct_change(a.revenue, b.revenue));
     let ebitda_yoy = inc
-        .get(0)
+        .first()
         .zip(inc.get(1))
         .and_then(|(a, b)| pct_change(a.ebitda, b.ebitda));
     let ni_yoy = inc
-        .get(0)
+        .first()
         .zip(inc.get(1))
         .and_then(|(a, b)| pct_change(a.net_income, b.net_income));
-    let eps_yoy = inc.get(0).zip(inc.get(1)).and_then(|(a, b)| {
+    let eps_yoy = inc.first().zip(inc.get(1)).and_then(|(a, b)| {
         let e0 = a.diluted_eps?;
         let e1 = b.diluted_eps?;
         pct_change(e0, e1)
@@ -102,30 +80,16 @@ pub fn build_fundamental_analysis(
         (None, None)
     };
 
-    let rev_yahoo = financials.revenue_growth * 100.0;
     let rev_disp = if rev_yoy.is_none() && financials.revenue_growth != 0.0 {
-        Some(rev_yahoo)
+        Some(financials.revenue_growth * 100.0)
     } else {
         rev_yoy
     };
-
-    let earn_yahoo = financials.earnings_growth * 100.0;
     let ni_disp = if ni_yoy.is_none() && financials.earnings_growth != 0.0 {
-        Some(earn_yahoo)
+        Some(financials.earnings_growth * 100.0)
     } else {
         ni_yoy
     };
-
-    let g_lines = vec![
-        line("Revenue growth YoY", rev_disp, "pct"),
-        line("Revenue CAGR (3Y)", rev_cagr_3, "pct"),
-        line("Revenue CAGR (5Y)", rev_cagr_5, "pct"),
-        line("EBITDA growth YoY", ebitda_yoy, "pct"),
-        line("Net profit growth YoY", ni_disp, "pct"),
-        line("EPS growth YoY", eps_yoy, "pct"),
-        line("EPS CAGR (3Y)", eps_cagr_3, "pct"),
-        line("EPS CAGR (5Y)", eps_cagr_5, "pct"),
-    ];
 
     let g_interp = {
         let r_ok = rev_disp.map(|x| x > 2.0).unwrap_or(false);
@@ -143,20 +107,34 @@ pub fn build_fundamental_analysis(
         }
         .to_string()
     };
+
     let mut g_flags = Vec::new();
     if inc.len() < 2 {
         g_flags.push("Fewer than 2 annual income points; YoY may be N/A.".to_string());
     }
 
-    let growth = FundamentalSection {
+    FundamentalSection {
         interpretation: g_interp,
         flags: g_flags,
-        confidence: conf.clone(),
-        lines: g_lines,
-    };
+        confidence: confidence.to_string(),
+        lines: vec![
+            line("Revenue growth YoY", rev_disp, "pct"),
+            line("Revenue CAGR (3Y)", rev_cagr_3, "pct"),
+            line("Revenue CAGR (5Y)", rev_cagr_5, "pct"),
+            line("EBITDA growth YoY", ebitda_yoy, "pct"),
+            line("Net profit growth YoY", ni_disp, "pct"),
+            line("EPS growth YoY", eps_yoy, "pct"),
+            line("EPS CAGR (3Y)", eps_cagr_3, "pct"),
+            line("EPS CAGR (5Y)", eps_cagr_5, "pct"),
+        ],
+    }
+}
 
-    // Profitability — prefer latest annual margins, fallback financials
-    let latest = inc.first().copied();
+fn fundamental_profitability_section(
+    latest: Option<&IncomeStatementRow>,
+    financials: &Financials,
+    confidence: &str,
+) -> FundamentalSection {
     let gross_m = latest
         .filter(|r| r.revenue > 0.0 && r.gross_profit > 0.0)
         .map(|r| r.gross_profit / r.revenue)
@@ -173,7 +151,6 @@ pub fn build_fundamental_analysis(
         .filter(|x| *x > 0.0)
         .unwrap_or(financials.ebitda_margins);
     let net_m = financials.profit_margins;
-
     let roe = financials.return_on_equity * 100.0;
     let roce = financials
         .return_on_capital_employed
@@ -211,18 +188,20 @@ pub fn build_fundamental_analysis(
     }
     .to_string();
 
-    let profitability = FundamentalSection {
+    FundamentalSection {
         interpretation: p_interp,
         flags: vec![],
-        confidence: conf.clone(),
+        confidence: confidence.to_string(),
         lines: p_lines,
-    };
+    }
+}
 
-    // Balance sheet — latest annual balance
-    let mut bal = bundle.balance_annual.clone();
-    bal.sort_by(|a, b| b.end_ts.unwrap_or(0).cmp(&a.end_ts.unwrap_or(0)));
-    let b0 = bal.first();
-
+fn fundamental_balance_section(
+    b0: Option<&BalanceSheetRow>,
+    latest: Option<&IncomeStatementRow>,
+    financials: &Financials,
+    confidence: &str,
+) -> FundamentalSection {
     let debt = b0.map(|b| b.total_debt).unwrap_or(financials.total_debt);
     let cash = b0.map(|b| b.cash).unwrap_or(financials.total_cash);
     let equity = b0.map(|b| b.total_equity).unwrap_or(0.0);
@@ -230,7 +209,6 @@ pub fn build_fundamental_analysis(
     let ca = b0.map(|b| b.current_assets).unwrap_or(0.0);
     let cl = b0.map(|b| b.current_liabilities).unwrap_or(0.0);
     let interest = b0.map(|b| b.interest_expense).unwrap_or(0.0);
-
     let net_debt = debt - cash;
     let d_eq = if equity.abs() > 1.0 {
         debt / equity
@@ -249,18 +227,6 @@ pub fn build_fundamental_analysis(
         (Some(e), i) if i > 1e-6 => Some(e / i),
         _ => None,
     };
-
-    let bs_lines = vec![
-        ("Total debt".to_string(), format!("{:.0}", debt)),
-        ("Cash & equivalents".to_string(), format!("{:.0}", cash)),
-        ("Net debt".to_string(), format!("{:.0}", net_debt)),
-        ("Debt / equity".to_string(), format!("{:.2}", d_eq)),
-        line("Current ratio", current_ratio, "x"),
-        line("Interest coverage", int_cov, "x"),
-        ("Total liabilities".to_string(), format!("{:.0}", liab)),
-        ("Total equity".to_string(), format!("{:.0}", equity)),
-    ];
-
     let de_screen = financials.debt_to_equity.max(d_eq);
     let bs_interp = if net_debt < 0.0 && cash > debt {
         "Net cash company: cash exceeds total debt on latest balance snapshot."
@@ -273,25 +239,41 @@ pub fn build_fundamental_analysis(
     }
     .to_string();
 
-    let balance_sheet = FundamentalSection {
+    FundamentalSection {
         interpretation: bs_interp,
         flags: if b0.is_none() {
             vec!["Balance sheet history sparse; using quote-level debt/cash where possible.".to_string()]
         } else {
             vec![]
         },
-        confidence: conf.clone(),
-        lines: bs_lines,
-    };
+        confidence: confidence.to_string(),
+        lines: vec![
+            ("Total debt".to_string(), format!("{:.0}", debt)),
+            ("Cash & equivalents".to_string(), format!("{:.0}", cash)),
+            ("Net debt".to_string(), format!("{:.0}", net_debt)),
+            ("Debt / equity".to_string(), format!("{:.2}", d_eq)),
+            line("Current ratio", current_ratio, "x"),
+            line("Interest coverage", int_cov, "x"),
+            ("Total liabilities".to_string(), format!("{:.0}", liab)),
+            ("Total equity".to_string(), format!("{:.0}", equity)),
+        ],
+    }
+}
 
-    // Cash flow — latest annual
-    let mut cf = bundle.cashflow_annual.clone();
-    cf.sort_by(|a, b| b.end_ts.unwrap_or(0).cmp(&a.end_ts.unwrap_or(0)));
-    let c0 = cf.first();
-    let cfo = c0.map(|c| c.operating_cashflow).unwrap_or(financials.operating_cashflow);
+fn fundamental_cashflow_section(
+    c0: Option<&crate::models::CashflowRow>,
+    latest: Option<&IncomeStatementRow>,
+    financials: &Financials,
+    confidence: &str,
+) -> FundamentalSection {
+    let cfo = c0
+        .map(|c| c.operating_cashflow)
+        .unwrap_or(financials.operating_cashflow);
     let capex = c0.map(|c| c.capital_expenditure).unwrap_or(0.0);
     let fcf = c0.map(|c| c.free_cashflow).unwrap_or(financials.free_cashflow);
-    let pat = financials.net_income.max(latest.map(|r| r.net_income).unwrap_or(0.0));
+    let pat = financials
+        .net_income
+        .max(latest.map(|r| r.net_income).unwrap_or(0.0));
     let cfo_pat = if pat.abs() > 1.0 { Some(cfo / pat) } else { None };
     let fcf_margin = if financials.revenue > 0.0 {
         Some((fcf / financials.revenue) * 100.0)
@@ -304,65 +286,74 @@ pub fn build_fundamental_analysis(
         None
     };
     let payout = financials.payout_ratio * 100.0;
-
-    let cf_lines = vec![
-        ("Operating cash flow".to_string(), format!("{:.0}", cfo)),
-        ("Capital expenditure".to_string(), format!("{:.0}", capex)),
-        ("Free cash flow".to_string(), format!("{:.0}", fcf)),
-        line("CFO / PAT", cfo_pat, "x"),
-        line("FCF margin", fcf_margin, "pct"),
-        line("FCF yield", fcf_yield, "pct"),
-        line(
-            "Dividend payout ratio",
-            if financials.payout_ratio > 0.0 {
-                Some(payout)
-            } else {
-                None
-            },
-            "pct",
-        ),
-    ];
-
     let cf_interp = match cfo_pat {
         Some(r) if r >= 1.0 && pat > 0.0 => "Good earnings quality: CFO at or above PAT.",
-        Some(r) if r < 0.5 && pat > 0.0 => "Weak earnings quality: PAT positive but CFO conversion weak.",
+        Some(r) if r < 0.5 && pat > 0.0 => {
+            "Weak earnings quality: PAT positive but CFO conversion weak."
+        }
         _ => "Cash flow quality mixed or data incomplete — verify with filings.",
     }
     .to_string();
 
-    let cash_flow = FundamentalSection {
+    FundamentalSection {
         interpretation: cf_interp,
         flags: vec![],
-        confidence: conf.clone(),
-        lines: cf_lines,
-    };
+        confidence: confidence.to_string(),
+        lines: vec![
+            ("Operating cash flow".to_string(), format!("{:.0}", cfo)),
+            ("Capital expenditure".to_string(), format!("{:.0}", capex)),
+            ("Free cash flow".to_string(), format!("{:.0}", fcf)),
+            line("CFO / PAT", cfo_pat, "x"),
+            line("FCF margin", fcf_margin, "pct"),
+            line("FCF yield", fcf_yield, "pct"),
+            line(
+                "Dividend payout ratio",
+                if financials.payout_ratio > 0.0 {
+                    Some(payout)
+                } else {
+                    None
+                },
+                "pct",
+            ),
+        ],
+    }
+}
 
-    // Efficiency
+fn fundamental_efficiency_section(
+    bundle: &StatementBundle,
+    inc: &[&IncomeStatementRow],
+    b0: Option<&BalanceSheetRow>,
+    latest: Option<&IncomeStatementRow>,
+    confidence: String,
+) -> FundamentalSection {
     let asset_turn = b0
         .zip(latest)
-        .filter(|(bal, inc)| bal.total_assets > 0.0 && inc.revenue > 0.0)
-        .map(|(bal, inc)| inc.revenue / bal.total_assets);
-
-    let inv_days = b0.zip(latest).and_then(|(bal, inc)| {
-        if inc.cost_of_revenue > 0.0 && bal.inventory > 0.0 {
-            Some((bal.inventory / inc.cost_of_revenue) * 365.0)
+        .filter(|(bal, row)| bal.total_assets > 0.0 && row.revenue > 0.0)
+        .map(|(bal, row)| row.revenue / bal.total_assets);
+    let inv_days = b0.zip(latest).and_then(|(bal, row)| {
+        if row.cost_of_revenue > 0.0 && bal.inventory > 0.0 {
+            Some((bal.inventory / row.cost_of_revenue) * 365.0)
         } else {
             None
         }
     });
-    let rec_days = b0.zip(latest).and_then(|(bal, inc)| {
-        if inc.revenue > 0.0 && bal.net_receivables > 0.0 {
-            Some((bal.net_receivables / inc.revenue) * 365.0)
+    let rec_days = b0.zip(latest).and_then(|(bal, row)| {
+        if row.revenue > 0.0 && bal.net_receivables > 0.0 {
+            Some((bal.net_receivables / row.revenue) * 365.0)
         } else {
             None
         }
     });
-
     let wc_trend = if inc.len() >= 2 {
-        let b_new = bundle.balance_annual.iter().max_by_key(|x| x.end_ts.unwrap_or(0));
-        let b_old = bundle.balance_annual.iter().filter(|x| {
-            x.end_ts.unwrap_or(0) < b_new.and_then(|n| n.end_ts).unwrap_or(0)
-        }).max_by_key(|x| x.end_ts.unwrap_or(0));
+        let b_new = bundle
+            .balance_annual
+            .iter()
+            .max_by_key(|x| x.end_ts.unwrap_or(0));
+        let b_old = bundle
+            .balance_annual
+            .iter()
+            .filter(|x| x.end_ts.unwrap_or(0) < b_new.and_then(|n| n.end_ts).unwrap_or(0))
+            .max_by_key(|x| x.end_ts.unwrap_or(0));
         match (b_new, b_old) {
             (Some(bn), Some(bo)) => {
                 let wc_n = bn.current_assets - bn.current_liabilities;
@@ -375,17 +366,9 @@ pub fn build_fundamental_analysis(
         None
     };
 
-    let eff_lines = vec![
-        line("Asset turnover", asset_turn, "x"),
-        line("Inventory days", inv_days, ""),
-        line("Receivable days", rec_days, ""),
-        line("Working capital Δ (latest vs prior)", wc_trend, ""),
-    ];
-
     let mut eff_flags = Vec::new();
-    let mut bal_sorted = bundle.balance_annual.clone();
-    bal_sorted.sort_by(|a, b| b.end_ts.unwrap_or(0).cmp(&a.end_ts.unwrap_or(0)));
-    if let (Some(cur), Some(prev)) = (inc.get(0), inc.get(1)) {
+    let bal_sorted = sort_owned_desc(bundle.balance_annual.clone(), |r| r.end_ts);
+    if let (Some(cur), Some(prev)) = (inc.first(), inc.get(1)) {
         let ag = if bal_sorted.len() >= 2 {
             pct_change(bal_sorted[0].net_receivables, bal_sorted[1].net_receivables)
         } else {
@@ -394,29 +377,47 @@ pub fn build_fundamental_analysis(
         if let (Some(rg), Some(ag)) = (pct_change(cur.revenue, prev.revenue), ag) {
             if ag > rg + 10.0 && bal_sorted[0].net_receivables > 0.0 {
                 eff_flags.push(
-                    "Receivables growing faster than revenue — watch collection quality.".to_string(),
+                    "Receivables growing faster than revenue — watch collection quality."
+                        .to_string(),
                 );
             }
         }
     }
 
-    let eff_interp = "Efficiency metrics from latest statements; days ratios need COGS/receivables present."
-        .to_string();
-
-    let efficiency = FundamentalSection {
-        interpretation: eff_interp,
+    FundamentalSection {
+        interpretation:
+            "Efficiency metrics from latest statements; days ratios need COGS/receivables present."
+                .to_string(),
         flags: eff_flags,
-        confidence: conf,
-        lines: eff_lines,
-    };
+        confidence,
+        lines: vec![
+            line("Asset turnover", asset_turn, "x"),
+            line("Inventory days", inv_days, ""),
+            line("Receivable days", rec_days, ""),
+            line("Working capital Δ (latest vs prior)", wc_trend, ""),
+        ],
+    }
+}
 
-    // Suppress broken balance_sheet lines mapping - I mixed line() with tuples. Fix balance_sheet construction
+pub fn build_fundamental_analysis(
+    bundle: &StatementBundle,
+    financials: &Financials,
+    _annual_reports: &[AnnualReport],
+) -> FundamentalAnalysis {
+    let inc = income_annual_desc(bundle);
+    let confidence = fundamental_confidence(inc.len());
+    let latest = inc.first().copied();
+
+    let bal = sort_owned_desc(bundle.balance_annual.clone(), |r| r.end_ts);
+    let b0 = bal.first();
+    let cf = sort_owned_desc(bundle.cashflow_annual.clone(), |r| r.end_ts);
+    let c0 = cf.first();
 
     FundamentalAnalysis {
-        growth,
-        profitability,
-        balance_sheet,
-        cash_flow,
-        efficiency,
+        growth: fundamental_growth_section(&inc, financials, &confidence),
+        profitability: fundamental_profitability_section(latest, financials, &confidence),
+        balance_sheet: fundamental_balance_section(b0, latest, financials, &confidence),
+        cash_flow: fundamental_cashflow_section(c0, latest, financials, &confidence),
+        efficiency: fundamental_efficiency_section(bundle, &inc, b0, latest, confidence),
     }
 }
