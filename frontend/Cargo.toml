@@ -13,6 +13,7 @@ web = [
     "dep:gloo-timers",
     "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
+    "dep:js-sys",
     "dep:web-sys",
     "chrono/wasmbind",
 ]
@@ -21,6 +22,7 @@ desktop = [
     "dioxus/desktop",
     "dep:stocker-core",
     "dep:stocker-screener",
+    "dep:stocker-mf",
     "dep:stocker-portfolio",
     "dep:tokio",
 ]
@@ -30,14 +32,17 @@ dioxus = { version = "0.6", features = ["router"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 urlencoding = "2"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 gloo-net = { version = "0.6", optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", optional = true, features = ["Window", "Storage"] }
+web-sys = { version = "0.3", optional = true, features = ["Window", "Storage", "File", "FileList", "FileReader", "HtmlInputElement", "ProgressEvent"] }
 stocker-core = { path = "../crates/stocker-core", optional = true }
 stocker-screener = { path = "../crates/stocker-screener", optional = true }
+stocker-mf = { path = "../crates/stocker-mf", optional = true }
 stocker-portfolio = { path = "../crates/stocker-portfolio", optional = true }
 tokio = { version = "1", features = ["sync", "time"], optional = true }

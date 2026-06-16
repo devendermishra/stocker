@@ -11,8 +11,9 @@ path = "src/main.rs"
 [dependencies]
 stocker-core = { path = "../stocker-core" }
 stocker-screener = { path = "../stocker-screener" }
+stocker-mf = { path = "../stocker-mf" }
 stocker-portfolio = { path = "../stocker-portfolio" }
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
 serde = { version = "1.0", features = ["derive"] }

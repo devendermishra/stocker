@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::components::Home;
 use crate::portfolio::{
-    PortfolioDashboard, PortfolioHoldings, PortfolioLabels, PortfolioList,
+    PortfolioDashboard, PortfolioHoldings, PortfolioLabels, PortfolioList, PortfolioOverview,
     PortfolioStockDetail, PortfolioTransactions,
 };
 use crate::report::Report;
@@ -24,6 +24,8 @@ pub enum Route {
     #[route("/portfolio/labels")]
     PortfolioLabels {},
     #[route("/portfolio/:id")]
+    PortfolioOverview { id: i64 },
+    #[route("/portfolio/:id/dashboard")]
     PortfolioDashboard { id: i64 },
     #[route("/portfolio/:id/holdings")]
     PortfolioHoldings { id: i64 },

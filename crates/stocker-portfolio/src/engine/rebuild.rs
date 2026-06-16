@@ -83,7 +83,11 @@ pub async fn rebuild(pool: &SqlitePool, portfolio_id: i64) -> Result<RebuildResu
 
     for txn in &txns {
         match txn.txn_type {
-            TransactionType::OpeningBalance | TransactionType::Buy => {
+            TransactionType::OpeningBalance
+            | TransactionType::Buy
+            | TransactionType::MergerInvestment
+            | TransactionType::DemergerInvestment
+            | TransactionType::Rights => {
                 let symbol = require_symbol(txn)?;
                 let qty = require_positive_qty(txn.quantity, "quantity")?;
                 let total_cost = buy_total_cost(txn)?;
@@ -98,14 +102,11 @@ pub async fn rebuild(pool: &SqlitePool, portfolio_id: i64) -> Result<RebuildResu
                 state.lots.push(lot.clone());
                 pending_lots.push((symbol, lot));
             }
-            TransactionType::Sell => {
+            TransactionType::Sell
+            | TransactionType::MergerRedemption
+            | TransactionType::DemergerRedemption => {
                 let symbol = require_symbol(txn)?;
                 let sell_qty = require_positive_qty(txn.quantity, "sell quantity")?;
-                let sell_price = txn.price.unwrap_or_else(|| {
-                    txn.gross_amount
-                        .map(|g| g / sell_qty)
-                        .unwrap_or(0.0)
-                });
                 let state = states.entry(symbol.clone()).or_default();
                 state.last_transaction_date = Some(txn.trade_date.clone());
 
@@ -115,6 +116,8 @@ pub async fn rebuild(pool: &SqlitePool, portfolio_id: i64) -> Result<RebuildResu
                         "sell quantity {sell_qty} exceeds available {available} for {symbol}"
                     )));
                 }
+
+                let sell_price = resolve_sell_price(txn, sell_qty, &state);
 
                 let mut remaining = sell_qty;
                 for lot in &mut state.lots {
@@ -173,11 +176,6 @@ pub async fn rebuild(pool: &SqlitePool, portfolio_id: i64) -> Result<RebuildResu
             }
             TransactionType::Bonus => {
                 let symbol = require_symbol(txn)?;
-                let (bonus_num, bonus_den) = bonus_ratio(txn)?;
-                if bonus_num <= 0.0 || bonus_den <= 0.0 {
-                    return Err(Error::Ledger("invalid bonus ratio".into()));
-                }
-                let factor = 1.0 + bonus_num / bonus_den;
                 if let Some(key) = &txn.corporate_action_key {
                     let state = states.entry(symbol.clone()).or_default();
                     if state.applied_corp_actions.contains_key(key) {
@@ -185,11 +183,32 @@ pub async fn rebuild(pool: &SqlitePool, portfolio_id: i64) -> Result<RebuildResu
                     }
                     state.applied_corp_actions.insert(key.clone(), ());
                 }
-                let state = states.entry(symbol).or_default();
+                let state = states.entry(symbol.clone()).or_default();
                 state.last_transaction_date = Some(txn.trade_date.clone());
-                for lot in &mut state.lots {
-                    lot.remaining_qty *= factor;
-                    // total_cost unchanged
+
+                if let (Some(bonus_num), Some(bonus_den)) =
+                    (txn.bonus_ratio_num, txn.bonus_ratio_den)
+                {
+                    if bonus_num <= 0.0 || bonus_den <= 0.0 {
+                        return Err(Error::Ledger("invalid bonus ratio".into()));
+                    }
+                    let factor = 1.0 + bonus_num / bonus_den;
+                    for lot in &mut state.lots {
+                        lot.remaining_qty *= factor;
+                        // total_cost unchanged
+                    }
+                } else if let Some(qty) = txn.quantity.filter(|q| *q > 0.0) {
+                    // Broker exports list bonus shares received without a ratio.
+                    let lot = Lot {
+                        source_txn_id: txn.id,
+                        acquired_date: txn.trade_date.clone(),
+                        remaining_qty: qty,
+                        total_cost: 0.0,
+                    };
+                    state.lots.push(lot.clone());
+                    pending_lots.push((symbol, lot));
+                } else {
+                    return Err(Error::Ledger("bonus ratio num required".into()));
                 }
             }
             TransactionType::Dividend => {
@@ -205,6 +224,7 @@ pub async fn rebuild(pool: &SqlitePool, portfolio_id: i64) -> Result<RebuildResu
                 state.dividend_received += gross;
                 state.last_transaction_date = Some(txn.trade_date.clone());
             }
+            TransactionType::Sip => {}
         }
     }
 
@@ -407,20 +427,38 @@ fn buy_total_cost(txn: &Transaction) -> Result<f64> {
     Ok(gross + brokerage + taxes)
 }
 
-fn split_ratio(txn: &Transaction) -> Result<(f64, f64)> {
-    let num = txn.split_ratio_num.ok_or_else(|| Error::Ledger("split ratio num required".into()))?;
-    let den = txn
-        .split_ratio_den
-        .ok_or_else(|| Error::Ledger("split ratio den required".into()))?;
-    Ok((num, den))
+fn resolve_sell_price(txn: &Transaction, sell_qty: f64, state: &SymbolState) -> f64 {
+    if let Some(price) = txn.price.map(f64::abs).filter(|p| *p > 0.0) {
+        return price;
+    }
+    if let Some(gross) = txn.gross_amount.map(f64::abs).filter(|g| *g > 0.0) {
+        return gross / sell_qty;
+    }
+    if let Some(net) = txn.net_amount.map(f64::abs).filter(|n| *n > 0.0) {
+        return net / sell_qty;
+    }
+    if matches!(
+        txn.txn_type,
+        TransactionType::DemergerRedemption | TransactionType::MergerRedemption
+    ) {
+        let total_cost = state.total_cost();
+        let total_qty = state.total_qty();
+        if total_qty > 1e-9 {
+            return total_cost / total_qty;
+        }
+    }
+    0.0
 }
 
-fn bonus_ratio(txn: &Transaction) -> Result<(f64, f64)> {
-    let num = txn.bonus_ratio_num.ok_or_else(|| Error::Ledger("bonus ratio num required".into()))?;
-    let den = txn
-        .bonus_ratio_den
-        .ok_or_else(|| Error::Ledger("bonus ratio den required".into()))?;
-    Ok((num, den))
+fn split_ratio(txn: &Transaction) -> Result<(f64, f64)> {
+    if let Some(num) = txn.split_ratio_num.filter(|n| *n > 0.0) {
+        let den = txn.split_ratio_den.filter(|d| *d > 0.0).unwrap_or(1.0);
+        return Ok((num, den));
+    }
+    if let Some(qty) = txn.quantity.filter(|q| *q > 0.0) {
+        return Ok((qty, 1.0));
+    }
+    Err(Error::Ledger("split ratio num required".into()))
 }
 
 #[cfg(test)]
@@ -615,6 +653,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn split_with_quantity_only_applies_multiplier() {
+        let pool = db::open_memory().await.unwrap();
+        let (user_id, portfolio_id) = setup_portfolio(&pool).await;
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::Buy,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("ITC.NS".into()),
+                quantity: Some(10.0),
+                price: Some(1000.0),
+                gross_amount: Some(10000.0),
+                brokerage: None,
+                taxes: None,
+                net_amount: Some(10000.0),
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::Split,
+                trade_date: "2024-06-01".into(),
+                symbol: Some("ITC.NS".into()),
+                quantity: Some(5.0),
+                price: None,
+                gross_amount: None,
+                brokerage: None,
+                taxes: None,
+                net_amount: None,
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = rebuild(&pool, portfolio_id).await.unwrap();
+        let stats = result.symbols.get("ITC.NS").unwrap();
+        assert!((stats.quantity - 50.0).abs() < 1e-6);
+        assert!((stats.total_cost - 10000.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
     async fn bonus_preserves_total_cost() {
         let pool = db::open_memory().await.unwrap();
         let (user_id, portfolio_id) = setup_portfolio(&pool).await;
@@ -677,6 +780,71 @@ mod tests {
         let stats = result.symbols.get("ITC.NS").unwrap();
         assert!((stats.quantity - 200.0).abs() < 1e-6);
         assert!((stats.total_cost - 50000.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn bonus_with_quantity_adds_zero_cost_lot() {
+        let pool = db::open_memory().await.unwrap();
+        let (user_id, portfolio_id) = setup_portfolio(&pool).await;
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::Buy,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("BSE.NS".into()),
+                quantity: Some(10.0),
+                price: Some(100.0),
+                gross_amount: Some(1000.0),
+                brokerage: None,
+                taxes: None,
+                net_amount: Some(1000.0),
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::Bonus,
+                trade_date: "2025-05-23".into(),
+                symbol: Some("BSE.NS".into()),
+                quantity: Some(1.0),
+                price: None,
+                gross_amount: None,
+                brokerage: None,
+                taxes: None,
+                net_amount: None,
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = rebuild(&pool, portfolio_id).await.unwrap();
+        let stats = result.symbols.get("BSE.NS").unwrap();
+        assert!((stats.quantity - 11.0).abs() < 1e-6);
+        assert!((stats.total_cost - 1000.0).abs() < 1e-6);
     }
 
     #[tokio::test]
@@ -745,6 +913,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merger_investment_adds_lot() {
+        let pool = db::open_memory().await.unwrap();
+        let (user_id, portfolio_id) = setup_portfolio(&pool).await;
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::MergerInvestment,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("ITC.NS".into()),
+                quantity: Some(10.0),
+                price: Some(100.0),
+                gross_amount: Some(1000.0),
+                brokerage: None,
+                taxes: None,
+                net_amount: Some(1000.0),
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = rebuild(&pool, portfolio_id).await.unwrap();
+        let stats = result.symbols.get("ITC.NS").unwrap();
+        assert!((stats.quantity - 10.0).abs() < 1e-6);
+        assert!((stats.total_cost - 1000.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn demerger_redemption_zero_gain() {
+        let pool = db::open_memory().await.unwrap();
+        let (user_id, portfolio_id) = setup_portfolio(&pool).await;
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::Buy,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("ITC.NS".into()),
+                quantity: Some(100.0),
+                price: Some(350.0),
+                gross_amount: Some(35000.0),
+                brokerage: None,
+                taxes: None,
+                net_amount: Some(35000.0),
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::DemergerRedemption,
+                trade_date: "2024-06-01".into(),
+                symbol: Some("ITC.NS".into()),
+                quantity: Some(10.0),
+                price: None,
+                gross_amount: None,
+                brokerage: None,
+                taxes: None,
+                net_amount: None,
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = rebuild(&pool, portfolio_id).await.unwrap();
+        let stats = result.symbols.get("ITC.NS").unwrap();
+        assert!((stats.quantity - 90.0).abs() < 1e-6);
+        assert!(stats.realized_gain.abs() < 1e-6);
+    }
+
+    #[tokio::test]
     async fn sell_exceeds_available_fails() {
         let pool = db::open_memory().await.unwrap();
         let (user_id, portfolio_id) = setup_portfolio(&pool).await;
@@ -804,5 +1075,48 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn sip_does_not_create_lots() {
+        let pool = db::open_memory().await.unwrap();
+        let (user_id, portfolio_id) = setup_portfolio(&pool).await;
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::Sip,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("MF:122639".into()),
+                quantity: None,
+                price: None,
+                gross_amount: Some(5000.0),
+                brokerage: None,
+                taxes: None,
+                net_amount: Some(5000.0),
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = rebuild(&pool, portfolio_id).await.unwrap();
+        assert_eq!(result.total_invested, 0.0);
+
+        let lots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fifo_lots WHERE portfolio_id = ?")
+            .bind(portfolio_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(lots, 0);
     }
 }

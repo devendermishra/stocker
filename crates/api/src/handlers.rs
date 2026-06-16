@@ -28,11 +28,17 @@ async fn resolve_screener_enrichment(
 ) -> Option<stocker_core::ScreenerMetricSnapshot> {
     let svc = screener?;
     let mut row = svc.snapshot_for(symbol).await.ok().flatten();
+    let has_price = row
+        .as_ref()
+        .and_then(|r| r.metrics.get("current_price"))
+        .and_then(|v| v.as_f64())
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .is_some();
     let fresh = row
         .as_ref()
         .map(|r| snapshot_is_fresh(r.updated_at, DEFAULT_SNAPSHOT_MAX_AGE_SECS))
         .unwrap_or(false);
-    if !fresh {
+    if !fresh || !has_price {
         if svc.refresh_now(symbol).await.is_ok() {
             row = svc.snapshot_for(symbol).await.ok().flatten();
         }

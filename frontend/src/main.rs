@@ -13,6 +13,7 @@ mod components;
 mod format;
 mod portfolio;
 mod portfolio_api;
+mod portfolio_data_revision;
 mod report;
 mod routes;
 mod screener;

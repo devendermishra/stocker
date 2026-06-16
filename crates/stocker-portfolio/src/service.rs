@@ -5,15 +5,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use sqlx::{Row, SqlitePool};
+use stocker_core::fetcher::fetch_price;
+use stocker_mf::{is_mutual_fund_symbol, parse_mf_symbol, MfSearchHit, MfService};
 use stocker_screener::ScreenerService;
 
 use crate::auth::ensure_local_user;
 use crate::engine::{rebuild, RebuildResult};
+use crate::returns::{self, ReturnMethod};
 use crate::error::{Error, Result};
 use crate::labels;
 use crate::models::{
-    holding_entity_id, AllocationRow, Dashboard, Holding, LabelEntityType, NewLabel,
-    NewPortfolio, NewTransaction, Portfolio, PortfolioSummary, Transaction, UpdatePortfolio,
+    holding_entity_id, AllocationRow, Dashboard, DeleteLabelResult, Holding, LabelEntityType,
+    NewLabel, NewPortfolio, NewTransaction, Portfolio, PortfolioSummary, Transaction,
+    UpdatePortfolio,
 };
 use crate::portfolios;
 use crate::transactions::{self, TransactionFilter};
@@ -23,12 +27,17 @@ use crate::{db, models::Label};
 pub struct PortfolioService {
     pool: SqlitePool,
     screener: Option<Arc<ScreenerService>>,
+    mf: Option<Arc<MfService>>,
 }
 
 impl PortfolioService {
-    pub async fn open(path: &Path, screener: Option<Arc<ScreenerService>>) -> Result<Self> {
+    pub async fn open(
+        path: &Path,
+        screener: Option<Arc<ScreenerService>>,
+        mf: Option<Arc<MfService>>,
+    ) -> Result<Self> {
         let pool = db::open(path).await?;
-        let svc = Self { pool, screener };
+        let svc = Self { pool, screener, mf };
         svc.ensure_local_user().await?;
         Ok(svc)
     }
@@ -46,6 +55,17 @@ impl PortfolioService {
         &self.pool
     }
 
+    /// Search mutual funds by name (mfapi.in).
+    pub async fn search_mutual_funds(&self, query: &str) -> Result<Vec<MfSearchHit>> {
+        let mf = self
+            .mf
+            .as_ref()
+            .ok_or_else(|| Error::Other("mutual fund service unavailable".into()))?;
+        mf.search(query)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
+    }
+
     // --- Portfolios ---
 
     pub async fn list_portfolios(
@@ -61,7 +81,9 @@ impl PortfolioService {
     }
 
     pub async fn create_portfolio(&self, user_id: i64, input: &NewPortfolio) -> Result<Portfolio> {
-        portfolios::create(&self.pool, user_id, input).await
+        let p = portfolios::create(&self.pool, user_id, input).await?;
+        labels::ensure_label_for_portfolio(&self.pool, user_id, p.id, &p.name).await?;
+        Ok(p)
     }
 
     pub async fn update_portfolio(
@@ -73,8 +95,9 @@ impl PortfolioService {
         portfolios::update(&self.pool, user_id, id, input).await
     }
 
-    pub async fn delete_portfolio(&self, user_id: i64, id: i64) -> Result<()> {
-        portfolios::delete(&self.pool, user_id, id).await
+    pub async fn delete_portfolio(&self, user_id: i64, id: i64) -> Result<DeleteLabelResult> {
+        let p = portfolios::get(&self.pool, user_id, id).await?;
+        labels::delete_by_name(&self.pool, user_id, &p.name).await
     }
 
     // --- Labels ---
@@ -91,7 +114,7 @@ impl PortfolioService {
         labels::update(&self.pool, user_id, id, input).await
     }
 
-    pub async fn delete_label(&self, user_id: i64, id: i64) -> Result<()> {
+    pub async fn delete_label(&self, user_id: i64, id: i64) -> Result<DeleteLabelResult> {
         labels::delete(&self.pool, user_id, id).await
     }
 
@@ -178,8 +201,95 @@ impl PortfolioService {
         transactions::delete(&self.pool, user_id, id).await
     }
 
+    pub async fn clear_portfolio_transactions(
+        &self,
+        user_id: i64,
+        portfolio_id: i64,
+    ) -> Result<crate::models::ClearTransactionsResult> {
+        let deleted =
+            transactions::delete_all_for_portfolio(&self.pool, user_id, portfolio_id).await?;
+        Ok(crate::models::ClearTransactionsResult {
+            transactions_deleted: deleted,
+        })
+    }
+
     pub async fn duplicate_transaction(&self, user_id: i64, id: i64) -> Result<Transaction> {
         transactions::duplicate(&self.pool, user_id, id).await
+    }
+
+    pub fn parse_import_file(&self, bytes: &[u8], filename: &str) -> Result<crate::import::ParsePreview> {
+        let grid = crate::import::parse_file(bytes, filename)?;
+        Ok(crate::import::build_preview(&grid))
+    }
+
+    pub async fn preview_import(
+        &self,
+        portfolio_id: i64,
+        header_row: usize,
+        column_mapping: &[crate::import::ImportField],
+        grid: &crate::import::RawGrid,
+    ) -> Vec<crate::import::ImportRowPreview> {
+        let mf_index = if let Some(mf) = &self.mf {
+            mf.ensure_scheme_index_cache().await.unwrap_or_default()
+        } else {
+            stocker_mf::load_scheme_index_from_file(&stocker_mf::default_scheme_list_cache_path())
+                .unwrap_or_default()
+        };
+        crate::import::preview_rows_with_index(
+            portfolio_id,
+            header_row,
+            column_mapping,
+            grid,
+            &mf_index,
+        )
+    }
+
+    pub async fn import_transactions(
+        &self,
+        user_id: i64,
+        portfolio_id: i64,
+        header_row: usize,
+        column_mapping: &[crate::import::ImportField],
+        grid: &crate::import::RawGrid,
+    ) -> Result<crate::import::ImportResult> {
+        let mf_index = if let Some(mf) = &self.mf {
+            mf.ensure_scheme_index_cache().await.unwrap_or_default()
+        } else {
+            stocker_mf::load_scheme_index_from_file(&stocker_mf::default_scheme_list_cache_path())
+                .unwrap_or_default()
+        };
+        let resolver_rows = crate::import::preview_rows_with_index(
+            portfolio_id,
+            header_row,
+            column_mapping,
+            grid,
+            &mf_index,
+        );
+
+        if let Some(mf) = &self.mf {
+            for row in &resolver_rows {
+                if let Some(txn) = &row.transaction {
+                    if let Some(sym) = txn.symbol.as_deref() {
+                        if let Some(code) = stocker_mf::parse_mf_symbol(sym) {
+                            let _ = mf.ensure_scheme(code).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        let txns: Vec<NewTransaction> = resolver_rows
+            .into_iter()
+            .filter_map(|r| r.transaction)
+            .collect();
+        crate::import::bulk_import_with_mf(
+            &self.pool,
+            user_id,
+            portfolio_id,
+            txns,
+            self.mf.clone(),
+        )
+        .await
     }
 
     pub async fn rebuild_portfolio(&self, user_id: i64, portfolio_id: i64) -> Result<RebuildResult> {
@@ -187,11 +297,35 @@ impl PortfolioService {
         rebuild::rebuild(&self.pool, portfolio_id).await
     }
 
+    pub async fn refresh_sip_transactions(
+        &self,
+        user_id: i64,
+        portfolio_id: i64,
+    ) -> Result<crate::sip_refresh::SipRefreshResult> {
+        let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
+        crate::sip_refresh::refresh_sip_transactions(
+            &self.pool,
+            self.mf.clone(),
+            user_id,
+            portfolio_id,
+        )
+        .await
+    }
+
     // --- Analytics ---
 
     pub async fn holdings(&self, user_id: i64, portfolio_id: i64) -> Result<Vec<Holding>> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
         let rebuild_result = rebuild::rebuild(&self.pool, portfolio_id).await?;
+        let txns = transactions::list(
+            &self.pool,
+            user_id,
+            &TransactionFilter {
+                portfolio_id: Some(portfolio_id),
+                ..Default::default()
+            },
+        )
+        .await?;
         let mut holdings = Vec::new();
 
         for (symbol, stats) in &rebuild_result.symbols {
@@ -206,7 +340,9 @@ impl PortfolioService {
                 &entity_id,
             )
             .await?;
-            let mut h = self.build_holding(symbol, stats, &label_list).await;
+            let h = self
+                .build_holding(symbol, stats, &label_list, &txns)
+                .await;
             holdings.push(h);
         }
 
@@ -236,6 +372,15 @@ impl PortfolioService {
     pub async fn summary(&self, user_id: i64, portfolio_id: i64) -> Result<PortfolioSummary> {
         let holdings = self.holdings(user_id, portfolio_id).await?;
         let rebuild_result = rebuild::rebuild(&self.pool, portfolio_id).await?;
+        let txns = transactions::list(
+            &self.pool,
+            user_id,
+            &TransactionFilter {
+                portfolio_id: Some(portfolio_id),
+                ..Default::default()
+            },
+        )
+        .await?;
 
         let invested = rebuild_result.total_invested;
         let current_mv: f64 = holdings.iter().filter_map(|h| h.current_value).sum();
@@ -245,13 +390,12 @@ impl PortfolioService {
         } else {
             0.0
         };
-        let total_return =
-            unrealized + rebuild_result.total_realized + rebuild_result.total_dividend;
-        let total_return_pct = if invested > 0.0 {
-            total_return / invested * 100.0
-        } else {
-            0.0
-        };
+
+        let terminal_values: HashMap<String, f64> = holdings
+            .iter()
+            .filter_map(|h| h.current_value.map(|mv| (h.symbol.clone(), mv)))
+            .collect();
+        let portfolio_returns = returns::portfolio_metrics(&txns, &terminal_values);
 
         Ok(PortfolioSummary {
             portfolio_id,
@@ -261,8 +405,11 @@ impl PortfolioService {
             unrealized_gain_pct: unrealized_pct,
             realized_gain: rebuild_result.total_realized,
             dividend_received: rebuild_result.total_dividend,
-            total_return,
-            total_return_pct,
+            total_return: portfolio_returns.total_return,
+            total_return_pct: portfolio_returns.return_pct.unwrap_or(0.0),
+            return_method: portfolio_returns
+                .return_method
+                .map(return_method_label),
             holdings_count: holdings.len(),
             rebuilt_at: rebuild_result.rebuilt_at,
         })
@@ -521,13 +668,37 @@ impl PortfolioService {
     }
 
     async fn resolve_symbol(&self, raw: &str) -> Result<String> {
-        if let Some(screener) = &self.screener {
-            return screener
-                .resolve_symbol(raw)
-                .await
-                .map_err(|e| Error::InvalidInput(e.to_string()));
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(Error::InvalidInput("symbol is required".into()));
         }
-        Ok(raw.trim().to_uppercase())
+
+        if is_mutual_fund_symbol(trimmed) {
+            if let Some(mf) = &self.mf {
+                if let Some(code) = parse_mf_symbol(trimmed) {
+                    mf.ensure_scheme(code)
+                        .await
+                        .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                    return Ok(trimmed.to_string());
+                }
+            }
+        }
+
+        if let Some(screener) = &self.screener {
+            if let Ok(resolved) = screener.resolve_symbol(trimmed).await {
+                return Ok(resolved);
+            }
+        }
+
+        if let Some(mf) = &self.mf {
+            let code = mf
+                .resolve_by_name(trimmed)
+                .await
+                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+            return Ok(stocker_mf::mf_symbol(code));
+        }
+
+        Ok(trimmed.to_uppercase())
     }
 
     async fn build_holding(
@@ -535,6 +706,7 @@ impl PortfolioService {
         symbol: &str,
         stats: &rebuild::SymbolStats,
         label_list: &[Label],
+        txns: &[Transaction],
     ) -> Holding {
         let avg_cost = if stats.quantity > 0.0 {
             stats.total_cost / stats.quantity
@@ -542,7 +714,7 @@ impl PortfolioService {
             0.0
         };
 
-        let (current_price, short_name, sector, industry, exchange) =
+        let (current_price, short_name, sector, industry, exchange, asset_class, nav_date) =
             self.enrich_symbol(symbol).await;
 
         let current_value = current_price.map(|p| p * stats.quantity);
@@ -554,16 +726,12 @@ impl PortfolioService {
                 0.0
             }
         });
-        let total_return = unrealized.map(|u| {
-            u + stats.realized_gain + stats.dividend_received
-        });
-        let total_return_pct = total_return.map(|tr| {
-            if stats.total_cost > 0.0 {
-                tr / stats.total_cost * 100.0
-            } else {
-                0.0
-            }
-        });
+
+        let return_metrics =
+            returns::symbol_metrics(txns, symbol, current_value);
+        let total_return = Some(return_metrics.total_return);
+        let total_return_pct = return_metrics.return_pct;
+        let return_method = return_metrics.return_method.map(return_method_label);
 
         Holding {
             symbol: symbol.to_string(),
@@ -578,12 +746,15 @@ impl PortfolioService {
             dividend_received: stats.dividend_received,
             total_return,
             total_return_pct,
+            return_method,
             portfolio_weight: None,
             last_transaction_date: stats.last_transaction_date.clone(),
             short_name,
             sector,
             industry,
             exchange,
+            asset_class,
+            nav_date,
             labels: label_list.to_vec(),
         }
     }
@@ -597,22 +768,90 @@ impl PortfolioService {
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
+        Option<String>,
     ) {
+        if is_mutual_fund_symbol(symbol) {
+            if let (Some(mf), Some(code)) = (&self.mf, parse_mf_symbol(symbol)) {
+                if let Ok(nav) = mf.latest_nav(code).await {
+                    return (
+                        Some(nav.nav),
+                        Some(nav.scheme_name),
+                        nav.scheme_category,
+                        None,
+                        Some("MF".into()),
+                        Some("mutual_fund".into()),
+                        Some(nav.nav_date),
+                    );
+                }
+            }
+            return (
+                None,
+                None,
+                None,
+                None,
+                Some("MF".into()),
+                Some("mutual_fund".into()),
+                None,
+            );
+        }
+
         if let Some(screener) = &self.screener {
+            let quote_symbol = screener
+                .resolve_symbol(symbol)
+                .await
+                .unwrap_or_else(|_| symbol.to_string());
             if let Ok(Some(row)) = screener.snapshot_for(symbol).await {
-                let price = row
+                let mut price = row
                     .metrics
                     .get("current_price")
-                    .and_then(|v| v.as_f64());
+                    .and_then(|v| v.as_f64())
+                    .filter(|p| p.is_finite() && *p > 0.0);
+                if price.is_none() {
+                    let live = fetch_price(&quote_symbol).await;
+                    if live > 0.0 {
+                        price = Some(live);
+                    }
+                }
                 return (
                     price,
                     row.short_name,
                     row.sector,
                     row.industry,
                     row.exchange,
+                    Some("equity".into()),
+                    None,
+                );
+            }
+            let live = fetch_price(&quote_symbol).await;
+            if live > 0.0 {
+                return (
+                    Some(live),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("equity".into()),
+                    None,
                 );
             }
         }
-        (None, None, None, None, None)
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("equity".into()),
+            None,
+        )
+    }
+}
+
+fn return_method_label(method: ReturnMethod) -> String {
+    match method {
+        ReturnMethod::Xirr => "xirr".to_string(),
+        ReturnMethod::Cagr => "cagr".to_string(),
+        ReturnMethod::Simple => "simple".to_string(),
     }
 }

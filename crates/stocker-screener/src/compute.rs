@@ -581,7 +581,8 @@ fn compute_price_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &mut Com
                 .copied()
                 .filter(|p| *p > 0.0)
         })
-        .unwrap_or(ctx.f.previous_close);
+        .or_else(|| pos(ctx.f.previous_close))
+        .unwrap_or(0.0);
     ctx.prev_close = chart_previous_close(ctx.chart)
         .or_else(|| pos(ctx.f.previous_close))
         .unwrap_or(0.0);

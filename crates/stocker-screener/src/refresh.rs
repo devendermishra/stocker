@@ -10,10 +10,14 @@ use tokio::sync::Notify;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
-use stocker_core::fetcher::{fetch_asset_profile, fetch_chart_history_10y, fetch_financials, fetch_statement_bundle};
+use stocker_core::fetcher::{
+    fetch_asset_profile, fetch_chart_history_10y, fetch_financials, fetch_price,
+    fetch_statement_bundle,
+};
 
 use crate::compute::{compute_all, ComputeInputs};
 use crate::error::Result;
+use crate::metrics::MetricId;
 use crate::snapshot::{count_pending, count_symbols, next_due_symbol, StockSnapshot, SymbolRow};
 use crate::universe;
 
@@ -280,7 +284,18 @@ pub async fn refresh_one(pool: &SqlitePool, symbol: &str) -> Result<()> {
         peer_quote: None,
         asset_profile: &profile,
     };
-    let metrics = compute_all(&inputs);
+    let mut metrics = compute_all(&inputs);
+    let has_price = metrics
+        .get(&MetricId::CurrentPrice)
+        .and_then(|v| *v)
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .is_some();
+    if !has_price {
+        let live = fetch_price(symbol).await;
+        if live > 0.0 {
+            metrics.insert(MetricId::CurrentPrice, Some(live));
+        }
+    }
 
     // Ensure FK parent row exists before writing the snapshot.
     SymbolRow {
