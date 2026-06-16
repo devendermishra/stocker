@@ -2,15 +2,15 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use stocker_portfolio::{
-    Error as PortfolioError, LabelEntityType, NewLabel, NewPortfolio, NewTransaction,
-    PortfolioService, TransactionFilter, UpdatePortfolio,
+    Error as PortfolioError, ImportApplyRequest, ImportParseBody, LabelEntityType, NewLabel,
+    NewPortfolio, NewTransaction, PortfolioService, TransactionFilter, UpdatePortfolio,
 };
 
 #[derive(Clone)]
@@ -79,12 +79,36 @@ pub fn router(service: Arc<PortfolioService>) -> Router {
             post(rebuild_portfolio),
         )
         .route(
+            "/api/v1/portfolio/portfolios/{id}/sip/refresh",
+            post(refresh_sip_transactions),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/transactions/clear",
+            post(clear_portfolio_transactions),
+        )
+        .route(
             "/api/v1/portfolio/portfolios/{id}/export/holdings.csv",
             get(export_holdings),
         )
         .route(
             "/api/v1/portfolio/portfolios/{id}/export/transactions.csv",
             get(export_transactions),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/import/parse",
+            post(parse_import),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/import/parse-json",
+            post(parse_import_json),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/import/preview",
+            post(preview_import_route),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/import",
+            post(apply_import),
         )
         .route(
             "/api/v1/portfolio/portfolios/{id}/stock/{symbol}/lots",
@@ -94,11 +118,24 @@ pub fn router(service: Arc<PortfolioService>) -> Router {
             "/api/v1/portfolio/portfolios/{id}/realized",
             get(realized_matches),
         )
+        .route("/api/v1/portfolio/mf/search", get(search_mutual_funds))
         .with_state(PortfolioState { service })
 }
 
 async fn local_user(s: &PortfolioState) -> Result<stocker_portfolio::User, Response> {
     s.service.local_user().await.map_err(portfolio_error_response)
+}
+
+#[derive(Deserialize)]
+struct MfSearchQuery {
+    q: String,
+}
+
+async fn search_mutual_funds(
+    State(s): State<PortfolioState>,
+    Query(q): Query<MfSearchQuery>,
+) -> Response {
+    portfolio_response(s.service.search_mutual_funds(&q.q).await)
 }
 
 #[derive(Deserialize)]
@@ -161,10 +198,7 @@ async fn delete_portfolio(State(s): State<PortfolioState>, Path(id): Path<i64>) 
         Ok(u) => u,
         Err(e) => return e,
     };
-    match s.service.delete_portfolio(user.id, id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => portfolio_error_response(e),
-    }
+    portfolio_response(s.service.delete_portfolio(user.id, id).await)
 }
 
 async fn list_labels(State(s): State<PortfolioState>) -> Response {
@@ -211,10 +245,7 @@ async fn delete_label(State(s): State<PortfolioState>, Path(id): Path<i64>) -> R
         Ok(u) => u,
         Err(e) => return e,
     };
-    match s.service.delete_label(user.id, id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => portfolio_error_response(e),
-    }
+    portfolio_response(s.service.delete_label(user.id, id).await)
 }
 
 #[derive(Deserialize)]
@@ -421,6 +452,25 @@ async fn rebuild_portfolio(State(s): State<PortfolioState>, Path(id): Path<i64>)
     )
 }
 
+async fn refresh_sip_transactions(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(s.service.refresh_sip_transactions(user.id, id).await)
+}
+
+async fn clear_portfolio_transactions(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(s.service.clear_portfolio_transactions(user.id, id).await)
+}
+
 async fn export_holdings(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
     let user = match local_user(&s).await {
         Ok(u) => u,
@@ -456,6 +506,142 @@ async fn export_transactions(
             .into_response(),
         Err(e) => portfolio_error_response(e),
     }
+}
+
+async fn parse_import(
+    State(s): State<PortfolioState>,
+    Path(_id): Path<i64>,
+    mut multipart: Multipart,
+) -> Response {
+    let _ = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut filename = "upload.csv".to_string();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            filename = field
+                .file_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| filename.clone());
+            match field.bytes().await {
+                Ok(bytes) => file_bytes = Some(bytes.to_vec()),
+                Err(e) => {
+                    return portfolio_error_response(PortfolioError::InvalidInput(format!(
+                        "read upload: {e}"
+                    )));
+                }
+            }
+        }
+    }
+
+    let bytes = match file_bytes {
+        Some(b) => b,
+        None => {
+            return portfolio_error_response(PortfolioError::InvalidInput(
+                "missing file field".into(),
+            ));
+        }
+    };
+
+    portfolio_response(s.service.parse_import_file(&bytes, &filename))
+}
+
+async fn parse_import_json(
+    State(s): State<PortfolioState>,
+    Path(_id): Path<i64>,
+    Json(body): Json<ImportParseBody>,
+) -> Response {
+    let _ = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let bytes = match base64_decode(&body.data_base64) {
+        Ok(b) => b,
+        Err(e) => return portfolio_error_response(PortfolioError::InvalidInput(e)),
+    };
+    portfolio_response(s.service.parse_import_file(&bytes, &body.filename))
+}
+
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    const TABLE: &[u8; 256] = &{
+        let mut t = [255u8; 256];
+        let mut i = 0u8;
+        while i < 64 {
+            t[b"A"[0] as usize + i as usize] = i;
+            t[b"a"[0] as usize + i as usize] = i;
+            t[b"0"[0] as usize + i as usize] = i + 52;
+            i += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &b in &bytes {
+        if b == b'=' {
+            break;
+        }
+        let v = TABLE[b as usize];
+        if v == 255 {
+            return Err("invalid base64".into());
+        }
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+async fn preview_import_route(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Json(body): Json<ImportApplyRequest>,
+) -> Response {
+    let _ = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let rows = s
+        .service
+        .preview_import(id, body.header_row, &body.column_mapping, &body.grid)
+        .await;
+    portfolio_response(Ok(serde_json::json!({ "rows": rows })))
+}
+
+async fn apply_import(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Json(body): Json<ImportApplyRequest>,
+) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(
+        s.service
+            .import_transactions(
+                user.id,
+                id,
+                body.header_row,
+                &body.column_mapping,
+                &body.grid,
+            )
+            .await,
+    )
 }
 
 async fn fifo_lots(

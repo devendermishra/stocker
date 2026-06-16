@@ -2,10 +2,13 @@ use dioxus::prelude::*;
 
 use crate::portfolio::layout::AuthGuard;
 use crate::portfolio_api::{
-    attach_label, fifo_lots, fmt_inr, holdings, list_labels, list_transactions, txn_type_label,
-    FifoLot, Holding, Label, Transaction, TransactionFilter,
+    attach_label, detach_label, fifo_lots, fmt_inr, holdings, list_labels, list_transactions,
+    txn_type_label, FifoLot, Holding, Label, Transaction, TransactionFilter,
 };
+use crate::portfolio_data_revision::portfolio_data_revision;
 use crate::routes::Route;
+
+const DELETE_BTN: &str = "padding: 0.15rem 0.45rem; border: 1px solid #f5c6cb; background: #fff; color: #b00020; border-radius: 6px; cursor: pointer; font-size: 0.75rem; margin-left: 0.35rem;";
 
 #[component]
 pub fn PortfolioStockDetail(id: i64, symbol: String) -> Element {
@@ -17,6 +20,7 @@ pub fn PortfolioStockDetail(id: i64, symbol: String) -> Element {
         move || {
             let s = sym.clone();
             let _ = reload();
+            let _ = portfolio_data_revision();
             async move {
                 let all = holdings(id).await?;
                 Ok(all.into_iter().find(|h| h.symbol == s))
@@ -27,6 +31,8 @@ pub fn PortfolioStockDetail(id: i64, symbol: String) -> Element {
         let sym = sym.clone();
         move || {
             let s = sym.clone();
+            let _ = reload();
+            let _ = portfolio_data_revision();
             async move { fifo_lots(id, &s).await }
         }
     });
@@ -34,6 +40,8 @@ pub fn PortfolioStockDetail(id: i64, symbol: String) -> Element {
         let sym = sym.clone();
         move || {
             let s = sym.clone();
+            let _ = reload();
+            let _ = portfolio_data_revision();
             async move {
                 list_transactions(&TransactionFilter {
                     portfolio_id: Some(id),
@@ -44,42 +52,20 @@ pub fn PortfolioStockDetail(id: i64, symbol: String) -> Element {
             }
         }
     });
-    let labels = use_resource(|| async move { list_labels().await });
+    let labels = use_resource(move || {
+        let _ = reload();
+        let _ = portfolio_data_revision();
+        async move { list_labels().await }
+    });
 
-    let holding_body = match holding.read_unchecked().as_ref() {
-        None => rsx! { p { "Loading" } },
-        Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },
-        Some(Ok(None)) => rsx! { p { "No current holding for this symbol" } },
-        Some(Ok(Some(h))) => render_holding_stats(h),
-    };
-
-    let labels_body = match labels.read_unchecked().as_ref() {
-        Some(Ok(ls)) => rsx! {
-            div { style: "display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;",
-                for l in ls.iter() {
-                    LabelAttachButton {
-                        portfolio_id: id,
-                        symbol: sym.clone(),
-                        label: l.clone(),
-                        on_attached: move || reload.set(reload() + 1),
-                    }
-                }
-            }
-        },
-        _ => rsx! {},
-    };
-
-    let lots_body = match lots.read_unchecked().as_ref() {
-        None => rsx! { p { "Loading lots" } },
-        Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },
-        Some(Ok(ls)) => render_lots(ls),
-    };
-
-    let txns_body = match txns.read_unchecked().as_ref() {
-        None => rsx! { p { "Loading" } },
-        Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },
-        Some(Ok(list)) => render_txn_list(list),
-    };
+    let attached_labels: Vec<Label> = holding
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .and_then(|h| h.as_ref())
+        .map(|h| h.labels.clone())
+        .unwrap_or_default();
+    let attached_ids: Vec<i64> = attached_labels.iter().map(|l| l.id).collect();
 
     rsx! {
         AuthGuard {
@@ -87,13 +73,116 @@ pub fn PortfolioStockDetail(id: i64, symbol: String) -> Element {
                 Link { to: Route::PortfolioHoldings { id }, style: "color: #1a56db;", "← Holdings" }
             }
             h1 { "{symbol}" }
-            {holding_body}
+            match &*holding.read() {
+                None => rsx! { p { "Loading…" } },
+                Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },
+                Some(Ok(None)) => rsx! { p { "No current holding for this symbol" } },
+                Some(Ok(Some(h))) => render_holding_stats(h),
+            }
+
+            h2 { "Labels" }
+            if attached_labels.is_empty() {
+                p { style: "color: #666; font-size: 0.9rem; margin-bottom: 1rem;", "No labels attached." }
+            } else {
+                div { style: "display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;",
+                    for label in attached_labels.iter() {
+                        AttachedLabelChip {
+                            key: "{label.id}",
+                            portfolio_id: id,
+                            symbol: sym.clone(),
+                            label: label.clone(),
+                            on_detached: move || reload.set(reload() + 1),
+                        }
+                    }
+                }
+            }
+            p { style: "color: #666; font-size: 0.85rem; margin-bottom: 0.75rem;",
+                Link { to: Route::PortfolioLabels {}, style: "color: #1a56db;",
+                    "Manage labels"
+                }
+                " — delete a label and all its linked transactions"
+            }
+
             h2 { "Attach label" }
-            {labels_body}
+            match &*labels.read() {
+                None => rsx! { p { "Loading labels…" } },
+                Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },
+                Some(Ok(all_labels)) => {
+                    let available: Vec<_> = all_labels
+                        .iter()
+                        .filter(|l| !attached_ids.contains(&l.id))
+                        .cloned()
+                        .collect();
+                    if available.is_empty() {
+                        rsx! {
+                            p { style: "color: #666; font-size: 0.9rem;",
+                                if all_labels.is_empty() {
+                                    "No labels defined yet. "
+                                } else {
+                                    "All labels are already attached. "
+                                }
+                                Link { to: Route::PortfolioLabels {}, style: "color: #1a56db;", "Create a label" }
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            div { style: "display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;",
+                                for l in available.iter() {
+                                    LabelAttachButton {
+                                        key: "{l.id}",
+                                        portfolio_id: id,
+                                        symbol: sym.clone(),
+                                        label: l.clone(),
+                                        on_attached: move || reload.set(reload() + 1),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             h2 { "FIFO lots" }
-            {lots_body}
+            match &*lots.read() {
+                None => rsx! { p { "Loading lots…" } },
+                Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },
+                Some(Ok(ls)) => render_lots(ls),
+            }
+
             h2 { "Transactions" }
-            {txns_body}
+            match &*txns.read() {
+                None => rsx! { p { "Loading…" } },
+                Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },
+                Some(Ok(list)) => render_txn_list(list),
+            }
+        }
+    }
+}
+
+#[component]
+fn AttachedLabelChip(
+    portfolio_id: i64,
+    symbol: String,
+    label: Label,
+    on_detached: EventHandler<()>,
+) -> Element {
+    rsx! {
+        span {
+            style: "display: inline-flex; align-items: center; padding: 0.35rem 0.65rem; border: 1px solid #d5dbe3; border-radius: 999px; background: #f6f8fb; font-size: 0.85rem;",
+            "{label.name}"
+            button {
+                style: "{DELETE_BTN}",
+                title: "Remove label from this holding",
+                onclick: move |_| {
+                    let entity_id = format!("{portfolio_id}:{symbol}");
+                    let lid = label.id;
+                    spawn(async move {
+                        let _ = detach_label(lid, "holding", &entity_id).await;
+                    });
+                    on_detached.call(());
+                },
+                "×"
+            }
         }
     }
 }
@@ -122,7 +211,6 @@ fn LabelAttachButton(
 }
 
 fn render_holding_stats(h: &Holding) -> Element {
-    let label_text = h.labels.iter().map(|l| l.name.clone()).collect::<Vec<_>>().join(", ");
     rsx! {
         div { style: "display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.75rem; margin-bottom: 1rem;",
             Stat { label: "Quantity".to_string(), value: format!("{:.2}", h.quantity) }
@@ -133,9 +221,6 @@ fn render_holding_stats(h: &Holding) -> Element {
             Stat { label: "Unrealized".to_string(), value: h.unrealized_gain.map(fmt_inr).unwrap_or_default() }
             Stat { label: "Realized".to_string(), value: fmt_inr(h.realized_gain) }
             Stat { label: "Dividends".to_string(), value: fmt_inr(h.dividend_received) }
-        }
-        if !label_text.is_empty() {
-            p { "Labels: {label_text}" }
         }
     }
 }
@@ -156,7 +241,7 @@ fn render_lots(ls: &[FifoLot]) -> Element {
 fn render_txn_list(list: &[Transaction]) -> Element {
     rsx! {
         for t in list.iter() {
-            TxnLine { txn: t.clone() }
+            TxnLine { key: "{t.id}", txn: t.clone() }
         }
     }
 }

@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use env_logger::Env;
+use stocker_mf::{db::default_db_path as mf_db_path, MfService};
 use stocker_portfolio::{db::default_db_path as portfolio_db_path, PortfolioService};
 use stocker_screener::{db::default_db_path, RefreshConfig, ScreenerService};
 
@@ -22,9 +23,19 @@ async fn main() {
         }
     };
 
+    let mf_db = mf_db_path();
+    log::info!("opening mutual fund DB at {}", mf_db.display());
+    let mf = match MfService::open(&mf_db).await {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            log::error!("could not open mf DB ({e}); MF NAV unavailable in portfolio");
+            None
+        }
+    };
+
     let port_db = portfolio_db_path();
     log::info!("opening portfolio DB at {}", port_db.display());
-    let portfolio = match PortfolioService::open(&port_db, screener.clone()).await {
+    let portfolio = match PortfolioService::open(&port_db, screener.clone(), mf).await {
         Ok(s) => Some(Arc::new(s)),
         Err(e) => {
             log::error!("could not open portfolio DB ({e}); running without /portfolio/* routes");

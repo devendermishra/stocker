@@ -8,6 +8,11 @@ use crate::error::{Error, Result};
 use crate::models::{NewTransaction, Transaction, TransactionType};
 use crate::portfolios;
 
+const TXN_SELECT: &str = "id, user_id, portfolio_id, txn_type, trade_date, symbol, quantity, price,
+         gross_amount, brokerage, taxes, net_amount, split_ratio_num, split_ratio_den,
+         bonus_ratio_num, bonus_ratio_den, dividend_per_share, tds, eligible_quantity,
+         notes, source, corporate_action_key, created_at, updated_at";
+
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct TransactionFilter {
     pub portfolio_id: Option<i64>,
@@ -17,6 +22,8 @@ pub struct TransactionFilter {
     pub to_date: Option<String>,
     pub label_id: Option<i64>,
     pub limit: Option<i64>,
+    /// `"equity"` or `"mutual_fund"`
+    pub asset_class: Option<String>,
 }
 
 pub async fn list(
@@ -52,6 +59,11 @@ pub async fn list(
              AND ll.entity_id = CAST(t.id AS TEXT) AND ll.label_id = ?)",
         );
     }
+    if filter.asset_class.as_deref() == Some("mutual_fund") {
+        sql.push_str(" AND t.symbol LIKE 'MF:%'");
+    } else if filter.asset_class.as_deref() == Some("equity") {
+        sql.push_str(" AND (t.symbol NOT LIKE 'MF:%' OR t.symbol IS NULL)");
+    }
     sql.push_str(" ORDER BY t.trade_date DESC, t.id DESC");
     if filter.limit.is_some() {
         sql.push_str(" LIMIT ?");
@@ -85,13 +97,9 @@ pub async fn list(
 }
 
 pub async fn get(pool: &SqlitePool, user_id: i64, id: i64) -> Result<Transaction> {
-    let row = sqlx::query(
-        "SELECT id, user_id, portfolio_id, txn_type, trade_date, symbol, quantity, price,
-         gross_amount, brokerage, taxes, net_amount, split_ratio_num, split_ratio_den,
-         bonus_ratio_num, bonus_ratio_den, dividend_per_share, tds, eligible_quantity,
-         notes, source, corporate_action_key, created_at, updated_at
-         FROM transactions WHERE id = ? AND user_id = ?",
-    )
+    let row = sqlx::query(&format!(
+        "SELECT {TXN_SELECT} FROM transactions WHERE id = ? AND user_id = ?"
+    ))
     .bind(id)
     .bind(user_id)
     .fetch_optional(pool)
@@ -101,10 +109,12 @@ pub async fn get(pool: &SqlitePool, user_id: i64, id: i64) -> Result<Transaction
 }
 
 pub async fn create(pool: &SqlitePool, user_id: i64, input: &NewTransaction) -> Result<Transaction> {
-    validate_new(input)?;
+    let mut input = input.clone();
+    normalize_trade_amounts(&mut input);
+    validate_new(&input)?;
     let _ = portfolios::get(pool, user_id, input.portfolio_id).await?;
     let now = Utc::now().timestamp();
-    let corp_key = corporate_action_key(input);
+    let corp_key = corporate_action_key(&input);
 
     let res = sqlx::query(
         "INSERT INTO transactions (user_id, portfolio_id, txn_type, trade_date, symbol, quantity,
@@ -157,10 +167,12 @@ pub async fn update(
     id: i64,
     input: &NewTransaction,
 ) -> Result<Transaction> {
-    validate_new(input)?;
+    let mut input = input.clone();
+    normalize_trade_amounts(&mut input);
+    validate_new(&input)?;
     let existing = get(pool, user_id, id).await?;
     let now = Utc::now().timestamp();
-    let corp_key = corporate_action_key(input);
+    let corp_key = corporate_action_key(&input);
 
     sqlx::query(
         "UPDATE transactions SET portfolio_id = ?, txn_type = ?, trade_date = ?, symbol = ?,
@@ -219,76 +231,106 @@ pub async fn delete(pool: &SqlitePool, user_id: i64, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub async fn duplicate(pool: &SqlitePool, user_id: i64, id: i64) -> Result<Transaction> {
-    let existing = get(pool, user_id, id).await?;
-    let input = NewTransaction {
-        portfolio_id: existing.portfolio_id,
-        txn_type: existing.txn_type,
-        trade_date: existing.trade_date,
-        symbol: existing.symbol,
-        quantity: existing.quantity,
-        price: existing.price,
-        gross_amount: existing.gross_amount,
-        brokerage: existing.brokerage,
-        taxes: existing.taxes,
-        net_amount: existing.net_amount,
-        split_ratio_num: existing.split_ratio_num,
-        split_ratio_den: existing.split_ratio_den,
-        bonus_ratio_num: existing.bonus_ratio_num,
-        bonus_ratio_den: existing.bonus_ratio_den,
-        dividend_per_share: existing.dividend_per_share,
-        tds: existing.tds,
-        eligible_quantity: existing.eligible_quantity,
-        notes: existing.notes,
-    };
-    create(pool, user_id, &input).await
+/// Remove every transaction in a portfolio and rebuild FIFO state.
+pub async fn delete_all_for_portfolio(
+    pool: &SqlitePool,
+    user_id: i64,
+    portfolio_id: i64,
+) -> Result<usize> {
+    let _ = portfolios::get(pool, user_id, portfolio_id).await?;
+    let txn_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM transactions WHERE portfolio_id = ? AND user_id = ?",
+    )
+    .bind(portfolio_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    for txn_id in &txn_ids {
+        sqlx::query(
+            "DELETE FROM label_links WHERE entity_type = 'transaction' AND entity_id = ?",
+        )
+        .bind(txn_id.to_string())
+        .execute(pool)
+        .await?;
+    }
+    let res = sqlx::query("DELETE FROM transactions WHERE portfolio_id = ? AND user_id = ?")
+        .bind(portfolio_id)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    rebuild::rebuild(pool, portfolio_id).await?;
+    Ok(res.rows_affected() as usize)
 }
 
-fn validate_new(input: &NewTransaction) -> Result<()> {
+pub async fn duplicate(pool: &SqlitePool, user_id: i64, id: i64) -> Result<Transaction> {
+    let existing = get(pool, user_id, id).await?;
+    create(pool, user_id, &existing.into()).await
+}
+
+fn positive_amount(v: Option<f64>) -> Option<f64> {
+    v.filter(|x| x.abs() > 0.0)
+}
+
+/// Derive net/gross from quantity × price when amount fields are missing.
+pub fn normalize_trade_amounts(input: &mut NewTransaction) {
+    let derived = positive_amount(input.quantity).and_then(|q| {
+        positive_amount(input.price).map(|p| q * p)
+    });
+    let amount = positive_amount(input.net_amount)
+        .or_else(|| positive_amount(input.gross_amount))
+        .or(derived);
+    if let Some(amount) = amount {
+        if positive_amount(input.net_amount).is_none() {
+            input.net_amount = Some(amount);
+        }
+        if positive_amount(input.gross_amount).is_none() {
+            input.gross_amount = Some(amount);
+        }
+    }
+}
+
+pub fn validate_new(input: &NewTransaction) -> Result<()> {
     if input.trade_date.trim().is_empty() {
         return Err(Error::InvalidInput("trade_date is required".into()));
     }
-    match input.txn_type {
-        TransactionType::Buy | TransactionType::Sell | TransactionType::OpeningBalance => {
-            if input.symbol.as_deref().unwrap_or("").is_empty() {
-                return Err(Error::InvalidInput("symbol is required".into()));
-            }
-            let qty = input.quantity.unwrap_or(0.0);
-            if qty <= 0.0 {
-                return Err(Error::InvalidInput("quantity must be positive".into()));
-            }
+    if input.txn_type.requires_symbol() && input.symbol.as_deref().unwrap_or("").is_empty() {
+        return Err(Error::InvalidInput("symbol is required".into()));
+    }
+    if input.txn_type.requires_positive_quantity() {
+        let qty = input.quantity.unwrap_or(0.0);
+        if qty <= 0.0 {
+            return Err(Error::InvalidInput("quantity must be positive".into()));
         }
-        TransactionType::Split | TransactionType::Bonus => {
-            if input.symbol.as_deref().unwrap_or("").is_empty() {
-                return Err(Error::InvalidInput("symbol is required".into()));
-            }
-        }
-        TransactionType::Dividend => {
-            if input.symbol.as_deref().unwrap_or("").is_empty() {
-                return Err(Error::InvalidInput("symbol is required".into()));
-            }
+    }
+    if input.txn_type == TransactionType::Sip {
+        let amount = input
+            .net_amount
+            .or(input.gross_amount)
+            .filter(|a| *a > 0.0);
+        if amount.is_none() {
+            return Err(Error::InvalidInput(
+                "sip requires net_amount or gross_amount".into(),
+            ));
         }
     }
     Ok(())
 }
 
-fn corporate_action_key(input: &NewTransaction) -> Option<String> {
+pub fn corporate_action_key(input: &NewTransaction) -> Option<String> {
     match input.txn_type {
         TransactionType::Split => {
             let sym = input.symbol.as_deref()?;
-            Some(format!(
-                "split:{sym}:{}:{}",
-                input.trade_date,
-                input.split_ratio_num.unwrap_or(0.0)
-            ))
+            let num = input.split_ratio_num.filter(|n| *n > 0.0).or(input.quantity)?;
+            let den = input.split_ratio_den.filter(|d| *d > 0.0).unwrap_or(1.0);
+            Some(format!("split:{sym}:{}:{num}:{den}", input.trade_date))
         }
         TransactionType::Bonus => {
             let sym = input.symbol.as_deref()?;
-            Some(format!(
-                "bonus:{sym}:{}:{}",
-                input.trade_date,
-                input.bonus_ratio_num.unwrap_or(0.0)
-            ))
+            let marker = input
+                .bonus_ratio_num
+                .map(|n| n.to_string())
+                .or_else(|| input.quantity.map(|q| format!("qty:{q}")))?;
+            Some(format!("bonus:{sym}:{}:{marker}", input.trade_date))
         }
         TransactionType::Dividend => {
             let sym = input.symbol.as_deref()?;
@@ -348,4 +390,166 @@ pub fn export_csv(transactions: &[Transaction]) -> Result<String> {
     }
     let bytes = wtr.into_inner().map_err(|e| Error::Other(format!("csv: {e}")))?;
     String::from_utf8(bytes).map_err(|e| Error::Other(format!("csv utf8: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::ensure_local_user;
+    use crate::engine::rebuild;
+    use crate::models::{NewPortfolio, TransactionType};
+
+    #[tokio::test]
+    async fn update_transaction_rebuilds_holdings() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let user = ensure_local_user(&pool).await.unwrap();
+        let portfolio = crate::portfolios::create(
+            &pool,
+            user.id,
+            &NewPortfolio {
+                name: "Test".into(),
+                description: None,
+                base_currency: None,
+                portfolio_type: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let buy = create(
+            &pool,
+            user.id,
+            &NewTransaction {
+                portfolio_id: portfolio.id,
+                txn_type: TransactionType::Buy,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("TEST.NS".into()),
+                quantity: Some(10.0),
+                price: Some(100.0),
+                gross_amount: None,
+                brokerage: None,
+                taxes: None,
+                net_amount: Some(1000.0),
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let before = rebuild::rebuild(&pool, portfolio.id).await.unwrap();
+        assert_eq!(before.symbols.get("TEST.NS").unwrap().quantity, 10.0);
+
+        update(
+            &pool,
+            user.id,
+            buy.id,
+            &NewTransaction {
+                portfolio_id: portfolio.id,
+                txn_type: TransactionType::Buy,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("TEST.NS".into()),
+                quantity: Some(20.0),
+                price: Some(100.0),
+                gross_amount: None,
+                brokerage: None,
+                taxes: None,
+                net_amount: Some(2000.0),
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let after = rebuild::rebuild(&pool, portfolio.id).await.unwrap();
+        assert_eq!(after.symbols.get("TEST.NS").unwrap().quantity, 20.0);
+    }
+
+    #[test]
+    fn normalize_trade_amounts_fills_from_quantity_and_price() {
+        let mut input = NewTransaction {
+            portfolio_id: 1,
+            txn_type: TransactionType::Buy,
+            trade_date: "2024-01-01".into(),
+            symbol: Some("TEST.NS".into()),
+            quantity: Some(10.0),
+            price: Some(100.0),
+            gross_amount: None,
+            brokerage: None,
+            taxes: None,
+            net_amount: None,
+            split_ratio_num: None,
+            split_ratio_den: None,
+            bonus_ratio_num: None,
+            bonus_ratio_den: None,
+            dividend_per_share: None,
+            tds: None,
+            eligible_quantity: None,
+            notes: None,
+        };
+        normalize_trade_amounts(&mut input);
+        assert_eq!(input.net_amount, Some(1000.0));
+        assert_eq!(input.gross_amount, Some(1000.0));
+    }
+
+    #[tokio::test]
+    async fn create_fills_missing_net_amount_from_quantity_and_price() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let user = ensure_local_user(&pool).await.unwrap();
+        let portfolio = crate::portfolios::create(
+            &pool,
+            user.id,
+            &NewPortfolio {
+                name: "Test".into(),
+                description: None,
+                base_currency: None,
+                portfolio_type: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let buy = create(
+            &pool,
+            user.id,
+            &NewTransaction {
+                portfolio_id: portfolio.id,
+                txn_type: TransactionType::Buy,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("TEST.NS".into()),
+                quantity: Some(5.0),
+                price: Some(200.0),
+                gross_amount: None,
+                brokerage: None,
+                taxes: None,
+                net_amount: None,
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(buy.net_amount, Some(1000.0));
+        assert_eq!(buy.gross_amount, Some(1000.0));
+    }
 }

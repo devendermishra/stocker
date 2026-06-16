@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/stocker-core",
     "crates/stocker-screener",
+    "crates/stocker-mf",
     "crates/stocker-portfolio",
     "crates/api",
     "crates/cli",

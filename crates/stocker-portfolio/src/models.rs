@@ -70,6 +70,26 @@ pub struct Label {
     pub name: String,
     pub color: Option<String>,
     pub created_at: i64,
+    /// Number of transactions deleted if this label is removed (list endpoint only).
+    #[serde(default)]
+    pub transaction_count: i64,
+    /// Holdings this label is attached to (list endpoint only).
+    #[serde(default)]
+    pub holding_count: i64,
+    /// Whole portfolios this label is attached to (list endpoint only).
+    #[serde(default)]
+    pub portfolio_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClearTransactionsResult {
+    pub transactions_deleted: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteLabelResult {
+    pub transactions_deleted: usize,
+    pub portfolios_deleted: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,10 +130,16 @@ impl LabelEntityType {
 pub enum TransactionType {
     OpeningBalance,
     Buy,
+    MergerInvestment,
+    DemergerInvestment,
+    MergerRedemption,
+    DemergerRedemption,
     Sell,
     Dividend,
     Split,
     Bonus,
+    Rights,
+    Sip,
 }
 
 impl TransactionType {
@@ -121,10 +147,16 @@ impl TransactionType {
         match self {
             Self::OpeningBalance => "opening_balance",
             Self::Buy => "buy",
+            Self::MergerInvestment => "merger_investment",
+            Self::DemergerInvestment => "demerger_investment",
+            Self::MergerRedemption => "merger_redemption",
+            Self::DemergerRedemption => "demerger_redemption",
             Self::Sell => "sell",
             Self::Dividend => "dividend",
             Self::Split => "split",
             Self::Bonus => "bonus",
+            Self::Rights => "rights",
+            Self::Sip => "sip",
         }
     }
 
@@ -132,12 +164,44 @@ impl TransactionType {
         match s {
             "opening_balance" => Some(Self::OpeningBalance),
             "buy" => Some(Self::Buy),
+            "merger_investment" => Some(Self::MergerInvestment),
+            "demerger_investment" => Some(Self::DemergerInvestment),
+            "merger_redemption" => Some(Self::MergerRedemption),
+            "demerger_redemption" => Some(Self::DemergerRedemption),
             "sell" => Some(Self::Sell),
             "dividend" => Some(Self::Dividend),
             "split" => Some(Self::Split),
             "bonus" => Some(Self::Bonus),
+            "rights" => Some(Self::Rights),
+            "sip" => Some(Self::Sip),
             _ => None,
         }
+    }
+
+    pub fn is_buy_like(self) -> bool {
+        matches!(
+            self,
+            Self::OpeningBalance
+                | Self::Buy
+                | Self::MergerInvestment
+                | Self::DemergerInvestment
+                | Self::Rights
+        )
+    }
+
+    pub fn is_sell_like(self) -> bool {
+        matches!(
+            self,
+            Self::Sell | Self::MergerRedemption | Self::DemergerRedemption
+        )
+    }
+
+    pub fn requires_symbol(self) -> bool {
+        !matches!(self, Self::Sip)
+    }
+
+    pub fn requires_positive_quantity(self) -> bool {
+        self.is_buy_like() || self.is_sell_like()
     }
 }
 
@@ -193,6 +257,31 @@ pub struct NewTransaction {
     pub notes: Option<String>,
 }
 
+impl From<Transaction> for NewTransaction {
+    fn from(t: Transaction) -> Self {
+        Self {
+            portfolio_id: t.portfolio_id,
+            txn_type: t.txn_type,
+            trade_date: t.trade_date,
+            symbol: t.symbol,
+            quantity: t.quantity,
+            price: t.price,
+            gross_amount: t.gross_amount,
+            brokerage: t.brokerage,
+            taxes: t.taxes,
+            net_amount: t.net_amount,
+            split_ratio_num: t.split_ratio_num,
+            split_ratio_den: t.split_ratio_den,
+            bonus_ratio_num: t.bonus_ratio_num,
+            bonus_ratio_den: t.bonus_ratio_den,
+            dividend_per_share: t.dividend_per_share,
+            tds: t.tds,
+            eligible_quantity: t.eligible_quantity,
+            notes: t.notes,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FifoLot {
     pub id: i64,
@@ -237,12 +326,18 @@ pub struct Holding {
     pub dividend_received: f64,
     pub total_return: Option<f64>,
     pub total_return_pct: Option<f64>,
+    /// `xirr` or `cagr` — how `total_return_pct` was computed.
+    pub return_method: Option<String>,
     pub portfolio_weight: Option<f64>,
     pub last_transaction_date: Option<String>,
     pub short_name: Option<String>,
     pub sector: Option<String>,
     pub industry: Option<String>,
     pub exchange: Option<String>,
+    #[serde(default)]
+    pub asset_class: Option<String>,
+    #[serde(default)]
+    pub nav_date: Option<String>,
     pub labels: Vec<Label>,
 }
 
@@ -257,6 +352,7 @@ pub struct PortfolioSummary {
     pub dividend_received: f64,
     pub total_return: f64,
     pub total_return_pct: f64,
+    pub return_method: Option<String>,
     pub holdings_count: usize,
     pub rebuilt_at: i64,
 }
