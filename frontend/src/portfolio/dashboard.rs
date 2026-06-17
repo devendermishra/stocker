@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::portfolio::layout::{AuthGuard, PortfolioNav, PortfolioTab};
-use crate::portfolio_api::{allocation_label, allocation_stock, dashboard, fmt_inr, fmt_pct, rebuild_portfolio, export_holdings_url, export_transactions_url};
+use crate::portfolio_api::{allocation_label, allocation_stock, dashboard, fmt_inr, fmt_pct, rebuild_portfolio, refresh_prices, export_holdings_url, export_transactions_url};
 use crate::portfolio_data_revision::portfolio_data_revision;
 use crate::routes::Route;
 
@@ -50,6 +50,21 @@ pub fn PortfolioDashboard(id: i64) -> Element {
                         });
                     },
                     "Recalculate"
+                }
+                button {
+                    style: "{BTN}",
+                    onclick: move |_| {
+                        spawn(async move {
+                            match refresh_prices(id).await {
+                                Ok(()) => {
+                                    msg.set(Some("Prices refreshed.".into()));
+                                    reload.set(reload() + 1);
+                                }
+                                Err(e) => msg.set(Some(e)),
+                            }
+                        });
+                    },
+                    "Refresh prices"
                 }
                 a {
                     href: "{export_holdings_url(id)}",

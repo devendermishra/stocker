@@ -10,7 +10,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use stocker_portfolio::{
     Error as PortfolioError, ImportApplyRequest, ImportParseBody, LabelEntityType, NewLabel,
-    NewPortfolio, NewTransaction, PortfolioService, TransactionFilter, UpdatePortfolio,
+    NewPortfolio, NewTransaction, PortfolioService, PortfolioViewOptions, TransactionFilter,
+    UpdatePortfolio,
 };
 
 #[derive(Clone)]
@@ -79,6 +80,10 @@ pub fn router(service: Arc<PortfolioService>) -> Router {
             post(rebuild_portfolio),
         )
         .route(
+            "/api/v1/portfolio/portfolios/{id}/refresh-prices",
+            post(refresh_prices),
+        )
+        .route(
             "/api/v1/portfolio/portfolios/{id}/sip/refresh",
             post(refresh_sip_transactions),
         )
@@ -124,6 +129,18 @@ pub fn router(service: Arc<PortfolioService>) -> Router {
 
 async fn local_user(s: &PortfolioState) -> Result<stocker_portfolio::User, Response> {
     s.service.local_user().await.map_err(portfolio_error_response)
+}
+
+#[derive(Deserialize, Default)]
+struct ViewQuery {
+    refresh_prices: Option<bool>,
+}
+
+fn view_options(q: &ViewQuery) -> PortfolioViewOptions {
+    PortfolioViewOptions {
+        force_refresh_prices: q.refresh_prices.unwrap_or(false),
+        ..Default::default()
+    }
 }
 
 #[derive(Deserialize)]
@@ -379,59 +396,87 @@ async fn duplicate_transaction(State(s): State<PortfolioState>, Path(id): Path<i
     )
 }
 
-async fn dashboard(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+async fn dashboard(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ViewQuery>,
+) -> Response {
     let user = match local_user(&s).await {
         Ok(u) => u,
         Err(e) => return e,
     };
-    portfolio_response(s.service.dashboard(user.id, id).await)
+    portfolio_response(s.service.dashboard(user.id, id, view_options(&q)).await)
 }
 
-async fn holdings(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+async fn holdings(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ViewQuery>,
+) -> Response {
     let user = match local_user(&s).await {
         Ok(u) => u,
         Err(e) => return e,
     };
     portfolio_response(
         s.service
-            .holdings(user.id, id)
+            .holdings(user.id, id, view_options(&q))
             .await
             .map(|h| serde_json::json!({ "holdings": h })),
     )
 }
 
-async fn summary(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+async fn summary(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ViewQuery>,
+) -> Response {
     let user = match local_user(&s).await {
         Ok(u) => u,
         Err(e) => return e,
     };
-    portfolio_response(s.service.summary(user.id, id).await)
+    portfolio_response(s.service.summary(user.id, id, view_options(&q)).await)
 }
 
-async fn allocation_stock(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+async fn allocation_stock(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ViewQuery>,
+) -> Response {
     let user = match local_user(&s).await {
         Ok(u) => u,
         Err(e) => return e,
     };
     portfolio_response(
         s.service
-            .allocation_by_stock(user.id, id)
+            .allocation_by_stock(user.id, id, view_options(&q))
             .await
             .map(|a| serde_json::json!({ "allocation": a })),
     )
 }
 
-async fn allocation_label(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+async fn allocation_label(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ViewQuery>,
+) -> Response {
     let user = match local_user(&s).await {
         Ok(u) => u,
         Err(e) => return e,
     };
     portfolio_response(
         s.service
-            .allocation_by_label(user.id, id)
+            .allocation_by_label(user.id, id, view_options(&q))
             .await
             .map(|a| serde_json::json!({ "allocation": a })),
     )
+}
+
+async fn refresh_prices(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(s.service.refresh_prices(user.id, id).await)
 }
 
 async fn rebuild_portfolio(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
@@ -471,12 +516,19 @@ async fn clear_portfolio_transactions(
     portfolio_response(s.service.clear_portfolio_transactions(user.id, id).await)
 }
 
-async fn export_holdings(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+async fn export_holdings(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ViewQuery>,
+) -> Response {
     let user = match local_user(&s).await {
         Ok(u) => u,
         Err(e) => return e,
     };
-    match s.service.export_holdings_csv(user.id, id).await {
+    match s
+        .service
+        .export_holdings_csv(user.id, id, view_options(&q))
+        .await {
         Ok(csv) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/csv")],

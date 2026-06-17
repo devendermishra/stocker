@@ -3,6 +3,7 @@
 //! Portfolio data lives in a separate SQLite file (`portfolio.db`).
 //! Market prices and stock metadata come from `stocker-screener`.
 
+pub mod analytics;
 pub mod auth;
 pub mod db;
 pub mod engine;
@@ -16,6 +17,7 @@ pub mod service;
 pub mod sip_refresh;
 pub mod transactions;
 
+pub use analytics::{allocations_by_label, allocations_by_stock, PortfolioView, PortfolioViewOptions};
 pub use auth::{ensure_local_user, AuthSession, LoginRequest, RegisterRequest, LOCAL_USER_EMAIL};
 pub use db::default_db_path;
 pub use error::{Error, Result};
