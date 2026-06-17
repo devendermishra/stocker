@@ -704,6 +704,13 @@ pub async fn rebuild_portfolio(portfolio_id: i64) -> Result<(), String> {
 }
 
 #[cfg(all(feature = "web", not(feature = "desktop")))]
+pub async fn refresh_prices(portfolio_id: i64) -> Result<(), String> {
+    let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/refresh-prices");
+    api_request("POST", &path, None::<&()>).await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
 pub async fn refresh_sip_transactions(portfolio_id: i64) -> Result<SipRefreshResult, String> {
     let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/sip/refresh");
     let text = api_request("POST", &path, None::<&()>).await?;

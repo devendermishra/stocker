@@ -8,7 +8,7 @@ use sqlx::{Row, SqlitePool};
 use crate::error::{Error, Result};
 use crate::models::{Transaction, TransactionType};
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SymbolStats {
     pub quantity: f64,
     pub total_cost: f64,
@@ -330,10 +330,13 @@ async fn persist_rebuild(
     });
 
     sqlx::query(
-        "INSERT INTO portfolio_snapshots (portfolio_id, summary_json, rebuilt_at)
-         VALUES (?, ?, ?)
+        "INSERT INTO portfolio_snapshots (portfolio_id, summary_json, rebuilt_at,
+         holdings_json, valuation_summary_json, symbol_prices_json, priced_at)
+         VALUES (?, ?, ?, NULL, NULL, NULL, 0)
          ON CONFLICT(portfolio_id) DO UPDATE SET summary_json = excluded.summary_json,
-         rebuilt_at = excluded.rebuilt_at",
+         rebuilt_at = excluded.rebuilt_at,
+         holdings_json = NULL, valuation_summary_json = NULL,
+         symbol_prices_json = NULL, priced_at = 0",
     )
     .bind(portfolio_id)
     .bind(summary.to_string())

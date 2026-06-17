@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use stocker_mf::{db::default_db_path as mf_db_path, MfService};
-use stocker_portfolio::{db::default_db_path, LabelEntityType, PortfolioService};
+use stocker_portfolio::{db::default_db_path, LabelEntityType, PortfolioService, PortfolioViewOptions};
 use tokio::sync::OnceCell;
 
 use super::{
@@ -200,7 +200,7 @@ pub async fn dashboard(portfolio_id: i64) -> Result<Dashboard, String> {
     let c = ctx().await?;
     convert(
         c.svc
-            .dashboard(c.uid, portfolio_id)
+            .dashboard(c.uid, portfolio_id, PortfolioViewOptions::default())
             .await
             .map_err(map_err)?,
     )
@@ -208,14 +208,19 @@ pub async fn dashboard(portfolio_id: i64) -> Result<Dashboard, String> {
 
 pub async fn holdings(portfolio_id: i64) -> Result<Vec<Holding>, String> {
     let c = ctx().await?;
-    convert(c.svc.holdings(c.uid, portfolio_id).await.map_err(map_err)?)
+    convert(
+        c.svc
+            .holdings(c.uid, portfolio_id, PortfolioViewOptions::default())
+            .await
+            .map_err(map_err)?,
+    )
 }
 
 pub async fn allocation_stock(portfolio_id: i64) -> Result<Vec<AllocationRow>, String> {
     let c = ctx().await?;
     convert(
         c.svc
-            .allocation_by_stock(c.uid, portfolio_id)
+            .allocation_by_stock(c.uid, portfolio_id, PortfolioViewOptions::default())
             .await
             .map_err(map_err)?,
     )
@@ -225,7 +230,7 @@ pub async fn allocation_label(portfolio_id: i64) -> Result<Vec<AllocationRow>, S
     let c = ctx().await?;
     convert(
         c.svc
-            .allocation_by_label(c.uid, portfolio_id)
+            .allocation_by_label(c.uid, portfolio_id, PortfolioViewOptions::default())
             .await
             .map_err(map_err)?,
     )
@@ -238,6 +243,15 @@ pub async fn rebuild_portfolio(portfolio_id: i64) -> Result<(), String> {
         .await
         .map_err(map_err)?;
     crate::portfolio_data_revision::bump_portfolio_data_revision();
+    Ok(())
+}
+
+pub async fn refresh_prices(portfolio_id: i64) -> Result<(), String> {
+    let c = ctx().await?;
+    c.svc
+        .refresh_prices(c.uid, portfolio_id)
+        .await
+        .map_err(map_err)?;
     Ok(())
 }
 
