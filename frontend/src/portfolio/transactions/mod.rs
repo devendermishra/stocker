@@ -9,8 +9,8 @@ use crate::portfolio::import::TransactionImport;
 use crate::portfolio::layout::{AuthGuard, PortfolioNav, PortfolioTab};
 use crate::portfolio::styles::{BTN_DANGER, BTN_PRIMARY, CANCEL_BTN, FILTER_BAR, INPUT};
 use crate::portfolio_api::{
-    clear_portfolio_transactions, list_transactions, refresh_sip_transactions, Transaction,
-    TransactionFilter,
+    clear_portfolio_transactions, list_transactions, refresh_sip_transactions,
+    refresh_swp_transactions, Transaction, TransactionFilter,
 };
 use crate::portfolio_data_revision::portfolio_data_revision;
 use crate::routes::Route;
@@ -50,6 +50,7 @@ pub fn PortfolioTransactions(id: i64) -> Element {
     let mut editing = use_signal(|| None::<Transaction>);
     let mut error = use_signal(|| None::<String>);
     let mut sip_refreshing = use_signal(|| false);
+    let mut swp_refreshing = use_signal(|| false);
     let mut sip_refresh_msg = use_signal(|| None::<String>);
     let mut confirm_clear_all = use_signal(|| false);
     let mut clearing = use_signal(|| false);
@@ -123,6 +124,7 @@ pub fn PortfolioTransactions(id: i64) -> Element {
                 show_form,
                 show_import,
                 sip_refreshing,
+                swp_refreshing,
                 clearing,
                 confirm_clear_all,
                 reload,
@@ -200,6 +202,7 @@ fn TransactionToolbar(
     mut show_form: Signal<bool>,
     mut show_import: Signal<bool>,
     mut sip_refreshing: Signal<bool>,
+    mut swp_refreshing: Signal<bool>,
     clearing: Signal<bool>,
     mut confirm_clear_all: Signal<bool>,
     mut reload: Signal<u32>,
@@ -254,6 +257,46 @@ fn TransactionToolbar(
                     });
                 },
                 if sip_refreshing() { "Refreshing SIP…" } else { "Refresh SIP transactions" }
+            }
+            Link {
+                to: Route::PortfolioSchedules { id },
+                style: "color: #1a56db; font-weight: 600; text-decoration: none;",
+                "SIPs & SWPs"
+            }
+            button {
+                style: "{BTN_PRIMARY}",
+                disabled: swp_refreshing(),
+                onclick: move |_| {
+                    spawn(async move {
+                        swp_refreshing.set(true);
+                        sip_refresh_msg.set(None);
+                        error.set(None);
+                        match refresh_swp_transactions(id).await {
+                            Ok(result) => {
+                                sip_refresh_msg.set(Some(format!(
+                                    "SWP refresh: {} sell(s) created, {} skipped, {} failed",
+                                    result.created.len(),
+                                    result.skipped.len(),
+                                    result.failed.len()
+                                )));
+                                if !result.created.is_empty() {
+                                    reload.set(reload() + 1);
+                                }
+                                if !result.failed.is_empty() {
+                                    let detail: Vec<String> = result
+                                        .failed
+                                        .iter()
+                                        .map(|f| format!("SWP #{} ({}): {}", f.swp_id, f.trade_date, f.reason))
+                                        .collect();
+                                    error.set(Some(detail.join("; ")));
+                                }
+                            }
+                            Err(e) => error.set(Some(e)),
+                        }
+                        swp_refreshing.set(false);
+                    });
+                },
+                if swp_refreshing() { "Refreshing SWP…" } else { "Refresh SWP transactions" }
             }
             button {
                 style: "{BTN_DANGER}",

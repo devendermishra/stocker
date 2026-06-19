@@ -690,6 +690,7 @@ fn map_row(
         tds: tds_raw.and_then(parse_number),
         eligible_quantity: eligible_raw.and_then(parse_number),
         notes: notes_raw.map(|s| s.to_string()),
+        schedule_id: None,
     };
 
     finalize_import_transaction(
@@ -945,6 +946,29 @@ fn finalize_import_transaction(
                 input.eligible_quantity = None;
             }
         }
+        TransactionType::Swp => {
+            let amount = abs_opt(input.gross_amount).or_else(|| abs_opt(input.net_amount));
+            if let Some(amt) = amount {
+                input.gross_amount = Some(amt);
+                input.net_amount = Some(amt);
+            }
+            let is_mf = input
+                .symbol
+                .as_deref()
+                .is_some_and(is_mutual_fund_symbol);
+            if is_mf {
+                if let (Some(qty), Some(price)) = (positive_qty(input.quantity), abs_opt(input.price))
+                {
+                    input.txn_type = TransactionType::Sell;
+                    input.quantity = Some(qty);
+                    input.price = Some(price);
+                    let gross = amount.unwrap_or(qty * price);
+                    input.gross_amount = Some(gross);
+                    input.net_amount = Some(gross);
+                    input.eligible_quantity = None;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -970,6 +994,7 @@ pub fn parse_txn_type(raw: &str) -> Result<TransactionType> {
         "split" | "splits" | "stock split" => TransactionType::Split,
         "opening balance" => TransactionType::OpeningBalance,
         "sip investment" | "sip" => TransactionType::Sip,
+        "swp" | "swp redemption" | "swp withdrawal" => TransactionType::Swp,
         _ => {
             return Err(Error::InvalidInput(format!(
                 "unknown transaction type: {raw}"
@@ -1026,6 +1051,7 @@ fn import_txn_sort_key(txn_type: TransactionType) -> u8 {
         | TransactionType::DemergerInvestment
         | TransactionType::Rights
         | TransactionType::Sip => 1,
+        TransactionType::Swp => 4,
         TransactionType::Split | TransactionType::Bonus => 2,
         TransactionType::Dividend => 3,
         TransactionType::Sell
@@ -1083,6 +1109,13 @@ pub async fn bulk_import_with_mf(
         if let Some(mf) = mf {
             let _ = crate::sip_refresh::refresh_sip_transactions(
                 pool,
+                Some(mf.clone()),
+                user_id,
+                portfolio_id,
+            )
+            .await;
+            let _ = crate::swp_refresh::refresh_swp_transactions(
+                pool,
                 Some(mf),
                 user_id,
                 portfolio_id,
@@ -1108,8 +1141,8 @@ async fn bulk_insert_one(pool: &SqlitePool, user_id: i64, input: &NewTransaction
         "INSERT INTO transactions (user_id, portfolio_id, txn_type, trade_date, symbol, quantity,
          price, gross_amount, brokerage, taxes, net_amount, split_ratio_num, split_ratio_den,
          bonus_ratio_num, bonus_ratio_den, dividend_per_share, tds, eligible_quantity, notes,
-         source, corporate_action_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import', ?, ?, ?)",
+         source, corporate_action_key, schedule_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import', ?, ?, ?, ?)",
     )
     .bind(user_id)
     .bind(input.portfolio_id)
@@ -1131,6 +1164,7 @@ async fn bulk_insert_one(pool: &SqlitePool, user_id: i64, input: &NewTransaction
     .bind(input.eligible_quantity)
     .bind(input.notes.as_deref())
     .bind(corp_key.as_deref())
+    .bind(input.schedule_id)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -1172,6 +1206,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             }
         }
 
@@ -1198,6 +1233,7 @@ mod tests {
         );
         assert_eq!(parse_txn_type("Splits").unwrap(), TransactionType::Split);
         assert_eq!(parse_txn_type("SIP Investment").unwrap(), TransactionType::Sip);
+        assert_eq!(parse_txn_type("swp redemption").unwrap(), TransactionType::Swp);
         assert_eq!(
             parse_txn_type("Sell/Redemption").unwrap(),
             TransactionType::Sell
@@ -1245,6 +1281,7 @@ mod tests {
             tds: None,
             eligible_quantity: Some(243258.22),
             notes: None,
+            schedule_id: None,
         };
         finalize_import_transaction(&mut input, Some("SIP Investment"), Some("115.974"), Some("43.1111"), None)
             .unwrap();
@@ -1276,6 +1313,7 @@ mod tests {
             tds: None,
             eligible_quantity: Some(500.0),
             notes: None,
+            schedule_id: None,
         };
         finalize_import_transaction(&mut input, Some("Splits"), Some("5"), None, None).unwrap();
         assert_eq!(input.split_ratio_num, Some(5.0));
@@ -1304,6 +1342,7 @@ mod tests {
             tds: None,
             eligible_quantity: Some(200.0),
             notes: None,
+            schedule_id: None,
         };
         finalize_import_transaction(
             &mut input,
@@ -1372,6 +1411,7 @@ mod tests {
             tds: None,
             eligible_quantity: None,
             notes: None,
+            schedule_id: None,
         };
         finalize_import_transaction(&mut input, None, None, None, None).unwrap();
         assert_eq!(input.quantity, Some(944.461));

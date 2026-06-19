@@ -305,6 +305,101 @@ impl PortfolioService {
         .await
     }
 
+    pub async fn refresh_swp_transactions(
+        &self,
+        user_id: i64,
+        portfolio_id: i64,
+    ) -> Result<crate::swp_refresh::SwpRefreshResult> {
+        let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
+        crate::swp_refresh::refresh_swp_transactions(
+            &self.pool,
+            self.mf.clone(),
+            user_id,
+            portfolio_id,
+        )
+        .await
+    }
+
+    pub async fn register_mf_schedule(
+        &self,
+        user_id: i64,
+        portfolio_id: i64,
+        input: &crate::models::RegisterMfSchedule,
+    ) -> Result<crate::models::RegisterMfScheduleResult> {
+        let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
+        let symbol = self.resolve_symbol(&input.symbol).await?;
+        crate::mf_schedule::register_mf_schedule(
+            &self.pool,
+            self.mf.clone(),
+            user_id,
+            portfolio_id,
+            &symbol,
+            input,
+        )
+        .await
+    }
+
+    pub async fn list_mf_schedules(
+        &self,
+        user_id: i64,
+        portfolio_id: i64,
+    ) -> Result<Vec<crate::models::MfSchedule>> {
+        let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
+        crate::mf_schedule::list_mf_schedules(
+            &self.pool,
+            user_id,
+            portfolio_id,
+            self.mf.as_deref(),
+        )
+        .await
+    }
+
+    pub async fn inactivate_mf_schedule(
+        &self,
+        user_id: i64,
+        schedule_id: i64,
+    ) -> Result<crate::models::MfSchedule> {
+        crate::mf_schedule::inactivate_schedule(&self.pool, user_id, schedule_id).await
+    }
+
+    pub async fn get_mf_scheme(&self, scheme_code: i64) -> Result<stocker_mf::MfSearchHit> {
+        let mf = self
+            .mf
+            .as_ref()
+            .ok_or_else(|| Error::Other("mutual fund service unavailable".into()))?;
+        let meta = mf.load_scheme_meta(scheme_code).await.map_err(|e| Error::Other(e.to_string()))?;
+        Ok(stocker_mf::MfSearchHit {
+            scheme_code: meta.scheme_code,
+            scheme_name: meta.scheme_name,
+        })
+    }
+
+    pub async fn scan_portfolio_refresh(
+        &self,
+        user_id: i64,
+        portfolio_id: i64,
+    ) -> Result<crate::portfolio_refresh::PortfolioRefreshScan> {
+        let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
+        crate::portfolio_refresh::scan_portfolio_refresh(&self.pool, user_id, portfolio_id).await
+    }
+
+    pub async fn apply_portfolio_refresh(
+        &self,
+        user_id: i64,
+        portfolio_id: i64,
+        selections: &[String],
+    ) -> Result<crate::portfolio_refresh::PortfolioRefreshApplyResult> {
+        let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
+        crate::portfolio_refresh::apply_portfolio_refresh(
+            &self.pool,
+            self.mf.clone(),
+            user_id,
+            portfolio_id,
+            selections,
+        )
+        .await
+    }
+
     pub async fn rebuild_portfolio(&self, user_id: i64, portfolio_id: i64) -> Result<RebuildResult> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
         ensure_ledger(&self.pool, portfolio_id, true).await

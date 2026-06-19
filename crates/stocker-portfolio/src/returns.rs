@@ -194,7 +194,7 @@ fn txn_cash_flow(txn: &Transaction) -> Option<CashFlow> {
         | TransactionType::MergerRedemption
         | TransactionType::DemergerRedemption => sell_cash_in(txn),
         TransactionType::Dividend => dividend_cash_in(txn),
-        TransactionType::Split | TransactionType::Bonus | TransactionType::Sip => return None,
+        TransactionType::Split | TransactionType::Bonus | TransactionType::Sip | TransactionType::Swp => return None,
     };
     if amount.abs() < 1e-9 {
         return None;
@@ -387,6 +387,7 @@ mod tests {
             notes: None,
             source: "manual".to_string(),
             corporate_action_key: None,
+            schedule_id: None,
             created_at: 0,
             updated_at: 0,
             labels: vec![],

@@ -12,6 +12,7 @@ pub enum PortfolioTab {
     Overview,
     Holdings,
     Transactions,
+    Schedules,
     Dashboard,
 }
 
@@ -29,6 +30,7 @@ pub fn PortfolioNav(id: i64, active: PortfolioTab) -> Element {
             Link { to: Route::PortfolioOverview { id }, style: "{tab_style(PortfolioTab::Overview)}", "Overview" }
             Link { to: Route::PortfolioHoldings { id }, style: "{tab_style(PortfolioTab::Holdings)}", "Holdings" }
             Link { to: Route::PortfolioTransactions { id }, style: "{tab_style(PortfolioTab::Transactions)}", "Transactions" }
+            Link { to: Route::PortfolioSchedules { id }, style: "{tab_style(PortfolioTab::Schedules)}", "SIPs & SWPs" }
             Link { to: Route::PortfolioDashboard { id }, style: "{tab_style(PortfolioTab::Dashboard)}", "Dashboard" }
         }
     }

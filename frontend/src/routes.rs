@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use crate::components::Home;
 use crate::portfolio::{
     PortfolioDashboard, PortfolioHoldings, PortfolioLabels, PortfolioList, PortfolioOverview,
-    PortfolioStockDetail, PortfolioTransactions,
+    PortfolioStockDetail, PortfolioTransactions, PortfolioSchedules,
 };
 use crate::report::Report;
 use crate::screener::Screener;
@@ -31,6 +31,8 @@ pub enum Route {
     PortfolioHoldings { id: i64 },
     #[route("/portfolio/:id/transactions")]
     PortfolioTransactions { id: i64 },
+    #[route("/portfolio/:id/sips")]
+    PortfolioSchedules { id: i64 },
     #[route("/portfolio/:id/stock/:symbol")]
     PortfolioStockDetail { id: i64, symbol: String },
 }

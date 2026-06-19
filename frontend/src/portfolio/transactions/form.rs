@@ -7,16 +7,19 @@ use crate::portfolio_api::{
 };
 
 use super::helpers::{
-    build_txn, fill_net_amount_string, form_initial_state, maybe_fill_net_amount, AssetKind,
+    build_txn, fill_net_amount_string, form_initial_state, maybe_fill_net_amount, resolve_mf_for_edit,
+    AssetKind,
 };
 
 const TXN_TYPE_OPTIONS: &[(TransactionType, &str, &str)] = &[
     (TransactionType::Buy, "buy", "Buy"),
+    (TransactionType::Sell, "sell", "Sell"),
+    (TransactionType::Sip, "sip", "SIP"),
+    (TransactionType::Swp, "swp", "SWP"),
     (TransactionType::MergerInvestment, "merger_investment", "Merger Investment"),
     (TransactionType::DemergerInvestment, "demerger_investment", "Demerger Investment"),
     (TransactionType::MergerRedemption, "merger_redemption", "Merger Redemption"),
     (TransactionType::DemergerRedemption, "demerger_redemption", "Demerger Redemption"),
-    (TransactionType::Sell, "sell", "Sell"),
     (TransactionType::OpeningBalance, "opening_balance", "Opening balance"),
     (TransactionType::Dividend, "dividend", "Dividend"),
     (TransactionType::Split, "split", "Splits"),
@@ -56,6 +59,21 @@ pub fn TransactionForm(
     let mut bonus_num = use_signal(|| initial.as_ref().map(|s| s.bonus_num.clone()).unwrap_or_else(|| "1".to_string()));
     let mut bonus_den = use_signal(|| initial.as_ref().map(|s| s.bonus_den.clone()).unwrap_or_else(|| "1".to_string()));
     let mut dividend_per_share = use_signal(|| initial.as_ref().map(|s| s.dividend_per_share.clone()).unwrap_or_default());
+
+    if let Some(ref txn) = edit {
+        if txn.symbol.as_deref().is_some_and(|s| s.starts_with("MF:")) {
+            let sym = txn.symbol.clone().unwrap_or_default();
+            use_effect(move || {
+                let sym = sym.clone();
+                spawn(async move {
+                    if let Some(hit) = resolve_mf_for_edit(sym).await {
+                        selected_mf.set(Some(hit.clone()));
+                        mf_query.set(hit.scheme_name);
+                    }
+                });
+            });
+        }
+    }
 
     let is_edit = edit_id.is_some();
     let heading = if is_edit { "Edit transaction" } else { "New transaction" };

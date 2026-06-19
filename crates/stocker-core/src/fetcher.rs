@@ -3,10 +3,13 @@ use serde_json::Value;
 use std::io;
 use std::sync::{Mutex, OnceLock};
 
+use chrono::{NaiveDate, TimeZone, Utc};
+
 use crate::models::{
     AnalystRecommendationPeriod, AnalystRecommendations, AnnualReport, AssetProfile, BalanceSheetRow,
-    CashflowRow, ChartBar, ChartHistory, Financials, IncomeStatementRow, InsiderTransaction,
-    InstitutionalHolder, MarketSignals, NewsItem, PeerQuote, Shareholders, StatementBundle,
+    CashflowRow, ChartBar, ChartDividendEvent, ChartEvents, ChartHistory, ChartSplitEvent,
+    Financials, IncomeStatementRow, InsiderTransaction, InstitutionalHolder, MarketSignals, NewsItem,
+    PeerQuote, Shareholders, StatementBundle,
 };
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -219,6 +222,152 @@ pub async fn fetch_chart_history(symbol: &str, range: &str) -> ChartHistory {
         });
     }
     ChartHistory { bars }
+}
+
+/// Fetch dividend and split events from Yahoo chart API since `period1` (YYYY-MM-DD).
+pub async fn fetch_chart_events(symbol: &str, period1: &str) -> ChartEvents {
+    let period1_ts = date_to_unix(period1).unwrap_or(0);
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&events=div|split&period1={}&period2={}",
+        urlencoding::encode(symbol),
+        period1_ts,
+        Utc::now().timestamp()
+    );
+    let client = http_client();
+    let mut res = crate::http_policy::yahoo_get(client, &url).await;
+    if res.as_ref().map(|r| !r.status().is_success()).unwrap_or(true) {
+        if let Some(crumb) = ensure_yahoo_crumb(client).await {
+            let url_c = format!("{}&crumb={}", url, urlencoding::encode(&crumb));
+            res = crate::http_policy::yahoo_get(client, &url_c).await;
+        }
+    }
+    let Ok(res) = res else {
+        return ChartEvents::default();
+    };
+    let Ok(text) = res.text().await else {
+        return ChartEvents::default();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return ChartEvents::default();
+    };
+    let result = match v["chart"]["result"].as_array().and_then(|a| a.first()) {
+        Some(r) => r,
+        None => return ChartEvents::default(),
+    };
+    let events = &result["events"];
+    ChartEvents {
+        dividends: parse_chart_dividends(&events["dividends"]),
+        splits: parse_chart_splits(&events["splits"]),
+    }
+}
+
+fn date_to_unix(date: &str) -> Option<i64> {
+    NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
+}
+
+fn ts_to_date(ts: i64) -> String {
+    Utc.timestamp_opt(ts, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+fn parse_chart_dividends(v: &Value) -> Vec<ChartDividendEvent> {
+    let mut out = Vec::new();
+    if let Some(obj) = v.as_object() {
+        for (key, item) in obj {
+            let ts = key.parse::<i64>().unwrap_or_else(|_| {
+                item.get("date")
+                    .and_then(|d| d.as_i64())
+                    .unwrap_or(0)
+            });
+            let amount = item
+                .get("amount")
+                .and_then(|a| a.as_f64())
+                .filter(|a| a.is_finite() && *a > 0.0)
+                .unwrap_or(0.0);
+            if ts > 0 && amount > 0.0 {
+                out.push(ChartDividendEvent {
+                    date: ts_to_date(ts),
+                    amount,
+                });
+            }
+        }
+    } else if let Some(arr) = v.as_array() {
+        for item in arr {
+            let ts = item.get("date").and_then(|d| d.as_i64()).unwrap_or(0);
+            let amount = item
+                .get("amount")
+                .and_then(|a| a.as_f64())
+                .filter(|a| a.is_finite() && *a > 0.0)
+                .unwrap_or(0.0);
+            if ts > 0 && amount > 0.0 {
+                out.push(ChartDividendEvent {
+                    date: ts_to_date(ts),
+                    amount,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.date.cmp(&b.date));
+    out
+}
+
+fn parse_chart_splits(v: &Value) -> Vec<ChartSplitEvent> {
+    let mut out = Vec::new();
+    if let Some(obj) = v.as_object() {
+        for (key, item) in obj {
+            let ts = key.parse::<i64>().unwrap_or_else(|_| {
+                item.get("date")
+                    .and_then(|d| d.as_i64())
+                    .unwrap_or(0)
+            });
+            let numerator = item
+                .get("numerator")
+                .or_else(|| item.get("splitRatio"))
+                .and_then(|n| n.as_f64())
+                .filter(|n| n.is_finite() && *n > 0.0)
+                .unwrap_or(0.0);
+            let denominator = item
+                .get("denominator")
+                .and_then(|d| d.as_f64())
+                .filter(|d| d.is_finite() && *d > 0.0)
+                .unwrap_or(1.0);
+            if ts > 0 && numerator > 0.0 {
+                out.push(ChartSplitEvent {
+                    date: ts_to_date(ts),
+                    numerator,
+                    denominator,
+                });
+            }
+        }
+    } else if let Some(arr) = v.as_array() {
+        for item in arr {
+            let ts = item.get("date").and_then(|d| d.as_i64()).unwrap_or(0);
+            let numerator = item
+                .get("numerator")
+                .and_then(|n| n.as_f64())
+                .filter(|n| n.is_finite() && *n > 0.0)
+                .unwrap_or(0.0);
+            let denominator = item
+                .get("denominator")
+                .and_then(|d| d.as_f64())
+                .filter(|d| d.is_finite() && *d > 0.0)
+                .unwrap_or(1.0);
+            if ts > 0 && numerator > 0.0 {
+                out.push(ChartSplitEvent {
+                    date: ts_to_date(ts),
+                    numerator,
+                    denominator,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.date.cmp(&b.date));
+    out
 }
 
 fn parse_income_rows(arr: Option<&Vec<Value>>) -> Vec<IncomeStatementRow> {
@@ -1413,7 +1562,7 @@ fn build_market_signals_narrative(
 mod tests {
     use super::{
         build_news_relevance_tokens, fallback_peer_symbols, news_relevance_score,
-        normalize_debt_to_equity, sector_news_relevance,
+        normalize_debt_to_equity, parse_chart_dividends, parse_chart_splits, sector_news_relevance,
     };
 
     #[test]
@@ -1493,5 +1642,28 @@ mod tests {
             "India tobacco sector faces new packaging norms for NSE-listed firms",
             "Tobacco"
         ));
+    }
+
+    #[test]
+    fn parse_chart_dividends_from_object_map() {
+        let v: serde_json::Value = serde_json::json!({
+            "1672531200": { "amount": 2.5, "date": 1672531200 },
+            "1704067200": { "amount": 3.0, "date": 1704067200 }
+        });
+        let divs = parse_chart_dividends(&v);
+        assert_eq!(divs.len(), 2);
+        assert!((divs[0].amount - 2.5).abs() < 1e-6);
+        assert!((divs[1].amount - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_chart_splits_from_object_map() {
+        let v: serde_json::Value = serde_json::json!({
+            "1598880600": { "numerator": 2.0, "denominator": 1.0, "date": 1598880600 }
+        });
+        let splits = parse_chart_splits(&v);
+        assert_eq!(splits.len(), 1);
+        assert!((splits[0].numerator - 2.0).abs() < 1e-6);
+        assert!((splits[0].denominator - 1.0).abs() < 1e-6);
     }
 }

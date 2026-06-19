@@ -81,7 +81,7 @@ pub async fn refresh_sip_transactions(
     Ok(result)
 }
 
-async fn load_materialized_sip_ids(
+pub async fn load_materialized_sip_ids(
     pool: &SqlitePool,
     user_id: i64,
     portfolio_id: i64,
@@ -101,7 +101,7 @@ async fn load_materialized_sip_ids(
         .collect())
 }
 
-async fn materialize_sip(
+pub async fn materialize_sip(
     pool: &SqlitePool,
     mf: Option<&MfService>,
     user_id: i64,
@@ -166,6 +166,7 @@ async fn materialize_sip(
         tds: None,
         eligible_quantity: None,
         notes: Some(notes),
+        schedule_id: sip.schedule_id,
     };
     transactions::validate_new(&input)?;
 
@@ -173,8 +174,8 @@ async fn materialize_sip(
         "INSERT INTO transactions (user_id, portfolio_id, txn_type, trade_date, symbol, quantity,
          price, gross_amount, brokerage, taxes, net_amount, split_ratio_num, split_ratio_den,
          bonus_ratio_num, bonus_ratio_den, dividend_per_share, tds, eligible_quantity, notes,
-         source, corporate_action_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sip_refresh', ?, ?, ?)",
+         source, corporate_action_key, schedule_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sip_refresh', ?, ?, ?, ?)",
     )
     .bind(user_id)
     .bind(input.portfolio_id)
@@ -196,6 +197,7 @@ async fn materialize_sip(
     .bind(input.eligible_quantity)
     .bind(input.notes.as_deref())
     .bind(corp_key.as_str())
+    .bind(input.schedule_id)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -289,6 +291,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await

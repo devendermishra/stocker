@@ -335,6 +335,7 @@ mod tests {
             tds: None,
             eligible_quantity: None,
             notes: None,
+            schedule_id: None,
         };
         crate::transactions::create(&pool, user.id, &txn).await.unwrap();
 

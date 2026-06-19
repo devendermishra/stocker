@@ -140,6 +140,7 @@ pub enum TransactionType {
     Bonus,
     Rights,
     Sip,
+    Swp,
 }
 
 impl TransactionType {
@@ -157,6 +158,7 @@ impl TransactionType {
             Self::Bonus => "bonus",
             Self::Rights => "rights",
             Self::Sip => "sip",
+            Self::Swp => "swp",
         }
     }
 
@@ -174,8 +176,13 @@ impl TransactionType {
             "bonus" => Some(Self::Bonus),
             "rights" => Some(Self::Rights),
             "sip" => Some(Self::Sip),
+            "swp" => Some(Self::Swp),
             _ => None,
         }
+    }
+
+    pub fn is_schedule_type(self) -> bool {
+        matches!(self, Self::Sip | Self::Swp)
     }
 
     pub fn is_buy_like(self) -> bool {
@@ -197,7 +204,7 @@ impl TransactionType {
     }
 
     pub fn requires_symbol(self) -> bool {
-        !matches!(self, Self::Sip)
+        !self.is_schedule_type()
     }
 
     pub fn requires_positive_quantity(self) -> bool {
@@ -229,6 +236,7 @@ pub struct Transaction {
     pub notes: Option<String>,
     pub source: String,
     pub corporate_action_key: Option<String>,
+    pub schedule_id: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]
@@ -255,6 +263,108 @@ pub struct NewTransaction {
     pub tds: Option<f64>,
     pub eligible_quantity: Option<f64>,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub schedule_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleType {
+    Sip,
+    Swp,
+}
+
+impl ScheduleType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sip => "sip",
+            Self::Swp => "swp",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "sip" => Some(Self::Sip),
+            "swp" => Some(Self::Swp),
+            _ => None,
+        }
+    }
+
+    pub fn txn_type(self) -> TransactionType {
+        match self {
+            Self::Sip => TransactionType::Sip,
+            Self::Swp => TransactionType::Swp,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleStatus {
+    Active,
+    Inactive,
+}
+
+impl ScheduleStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(Self::Active),
+            "inactive" => Some(Self::Inactive),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MfSchedule {
+    pub id: i64,
+    pub user_id: i64,
+    pub portfolio_id: i64,
+    pub schedule_type: ScheduleType,
+    pub symbol: String,
+    pub scheme_name: Option<String>,
+    pub amount: f64,
+    pub start_date: String,
+    pub end_date: Option<String>,
+    pub installment_count: Option<i32>,
+    pub sip_day: i32,
+    pub status: ScheduleStatus,
+    pub registered_installments: i32,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterMfSchedule {
+    pub schedule_type: ScheduleType,
+    pub symbol: String,
+    pub amount: f64,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub installment_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleFailure {
+    pub trade_date: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterMfScheduleResult {
+    pub schedule_id: i64,
+    pub registered: Vec<i64>,
+    pub materialized: Vec<i64>,
+    pub skipped_months: Vec<String>,
+    pub status: ScheduleStatus,
+    pub failed: Vec<ScheduleFailure>,
 }
 
 impl From<Transaction> for NewTransaction {
@@ -278,6 +388,7 @@ impl From<Transaction> for NewTransaction {
             tds: t.tds,
             eligible_quantity: t.eligible_quantity,
             notes: t.notes,
+            schedule_id: t.schedule_id,
         }
     }
 }

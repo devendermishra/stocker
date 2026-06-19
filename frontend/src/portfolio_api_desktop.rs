@@ -11,8 +11,9 @@ use tokio::sync::OnceCell;
 use super::{
     AllocationRow, Dashboard, FifoLot, Holding, ImportApplyRequest, ImportField, ImportResult,
     ImportRowPreview, Label, MfSearchHit, NewLabel, NewPortfolio, NewTransaction, ParsePreview,
-    Portfolio, RawGrid, DeleteLabelResult, ClearTransactionsResult, SipRefreshResult, Transaction, TransactionFilter,
-    UpdatePortfolio,
+    Portfolio, PortfolioRefreshApplyResult, PortfolioRefreshScan, RawGrid, DeleteLabelResult,
+    ClearTransactionsResult, MfSchedule, RegisterMfSchedule, RegisterMfScheduleResult,
+    SipRefreshResult, SwpRefreshResult, Transaction, TransactionFilter, UpdatePortfolio,
 };
 
 static SERVICE: OnceCell<Arc<PortfolioService>> = OnceCell::const_new();
@@ -267,6 +268,95 @@ pub async fn refresh_sip_transactions(portfolio_id: i64) -> Result<SipRefreshRes
         crate::portfolio_data_revision::bump_portfolio_data_revision();
     }
     Ok(result)
+}
+
+pub async fn scan_portfolio_refresh(portfolio_id: i64) -> Result<PortfolioRefreshScan, String> {
+    let c = ctx().await?;
+    convert(
+        c.svc
+            .scan_portfolio_refresh(c.uid, portfolio_id)
+            .await
+            .map_err(map_err)?,
+    )
+}
+
+pub async fn apply_portfolio_refresh(
+    portfolio_id: i64,
+    selections: &[String],
+) -> Result<PortfolioRefreshApplyResult, String> {
+    let c = ctx().await?;
+    let result: PortfolioRefreshApplyResult = convert(
+        c.svc
+            .apply_portfolio_refresh(c.uid, portfolio_id, selections)
+            .await
+            .map_err(map_err)?,
+    )?;
+    if result.corporate_actions_created > 0
+        || result.sip_registered > 0
+        || result.sip_materialized > 0
+        || result.swp_registered > 0
+        || result.swp_materialized > 0
+    {
+        crate::portfolio_data_revision::bump_portfolio_data_revision();
+    }
+    Ok(result)
+}
+
+pub async fn refresh_swp_transactions(portfolio_id: i64) -> Result<SwpRefreshResult, String> {
+    let c = ctx().await?;
+    let result: SwpRefreshResult = convert(
+        c.svc
+            .refresh_swp_transactions(c.uid, portfolio_id)
+            .await
+            .map_err(map_err)?,
+    )?;
+    if !result.created.is_empty() {
+        crate::portfolio_data_revision::bump_portfolio_data_revision();
+    }
+    Ok(result)
+}
+
+pub async fn register_mf_schedule(
+    portfolio_id: i64,
+    input: &RegisterMfSchedule,
+) -> Result<RegisterMfScheduleResult, String> {
+    let c = ctx().await?;
+    let input: stocker_portfolio::RegisterMfSchedule = convert(input)?;
+    let result: RegisterMfScheduleResult = convert(
+        c.svc
+            .register_mf_schedule(c.uid, portfolio_id, &input)
+            .await
+            .map_err(map_err)?,
+    )?;
+    if !result.registered.is_empty() || !result.materialized.is_empty() {
+        crate::portfolio_data_revision::bump_portfolio_data_revision();
+    }
+    Ok(result)
+}
+
+pub async fn list_mf_schedules(portfolio_id: i64) -> Result<Vec<MfSchedule>, String> {
+    let c = ctx().await?;
+    convert(
+        c.svc
+            .list_mf_schedules(c.uid, portfolio_id)
+            .await
+            .map_err(map_err)?,
+    )
+}
+
+pub async fn inactivate_mf_schedule(schedule_id: i64) -> Result<MfSchedule, String> {
+    let c = ctx().await?;
+    convert(
+        c.svc
+            .inactivate_mf_schedule(c.uid, schedule_id)
+            .await
+            .map_err(map_err)?,
+    )
+}
+
+pub async fn get_mf_scheme(scheme_code: i64) -> Result<MfSearchHit, String> {
+    let c = ctx().await?;
+    convert(c.svc.get_mf_scheme(scheme_code).await.map_err(map_err)?)
 }
 
 pub async fn fifo_lots(portfolio_id: i64, symbol: &str) -> Result<Vec<FifoLot>, String> {

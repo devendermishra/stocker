@@ -11,7 +11,7 @@ use crate::portfolios;
 const TXN_SELECT: &str = "id, user_id, portfolio_id, txn_type, trade_date, symbol, quantity, price,
          gross_amount, brokerage, taxes, net_amount, split_ratio_num, split_ratio_den,
          bonus_ratio_num, bonus_ratio_den, dividend_per_share, tds, eligible_quantity,
-         notes, source, corporate_action_key, created_at, updated_at";
+         notes, source, corporate_action_key, schedule_id, created_at, updated_at";
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct TransactionFilter {
@@ -24,6 +24,7 @@ pub struct TransactionFilter {
     pub limit: Option<i64>,
     /// `"equity"` or `"mutual_fund"`
     pub asset_class: Option<String>,
+    pub schedule_id: Option<i64>,
 }
 
 pub async fn list(
@@ -35,7 +36,7 @@ pub async fn list(
         "SELECT t.id, t.user_id, t.portfolio_id, t.txn_type, t.trade_date, t.symbol, t.quantity,
          t.price, t.gross_amount, t.brokerage, t.taxes, t.net_amount, t.split_ratio_num,
          t.split_ratio_den, t.bonus_ratio_num, t.bonus_ratio_den, t.dividend_per_share, t.tds,
-         t.eligible_quantity, t.notes, t.source, t.corporate_action_key, t.created_at, t.updated_at
+         t.eligible_quantity, t.notes, t.source, t.corporate_action_key, t.schedule_id, t.created_at, t.updated_at
          FROM transactions t WHERE t.user_id = ?",
     );
     if filter.portfolio_id.is_some() {
@@ -64,6 +65,9 @@ pub async fn list(
     } else if filter.asset_class.as_deref() == Some("equity") {
         sql.push_str(" AND (t.symbol NOT LIKE 'MF:%' OR t.symbol IS NULL)");
     }
+    if filter.schedule_id.is_some() {
+        sql.push_str(" AND t.schedule_id = ?");
+    }
     sql.push_str(" ORDER BY t.trade_date DESC, t.id DESC");
     if filter.limit.is_some() {
         sql.push_str(" LIMIT ?");
@@ -86,6 +90,9 @@ pub async fn list(
         q = q.bind(v);
     }
     if let Some(v) = &filter.label_id {
+        q = q.bind(v);
+    }
+    if let Some(v) = &filter.schedule_id {
         q = q.bind(v);
     }
     if let Some(v) = &filter.limit {
@@ -120,8 +127,8 @@ pub async fn create(pool: &SqlitePool, user_id: i64, input: &NewTransaction) -> 
         "INSERT INTO transactions (user_id, portfolio_id, txn_type, trade_date, symbol, quantity,
          price, gross_amount, brokerage, taxes, net_amount, split_ratio_num, split_ratio_den,
          bonus_ratio_num, bonus_ratio_den, dividend_per_share, tds, eligible_quantity, notes,
-         source, corporate_action_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?)",
+         source, corporate_action_key, schedule_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?)",
     )
     .bind(user_id)
     .bind(input.portfolio_id)
@@ -143,6 +150,7 @@ pub async fn create(pool: &SqlitePool, user_id: i64, input: &NewTransaction) -> 
     .bind(input.eligible_quantity)
     .bind(input.notes.as_deref())
     .bind(corp_key.as_deref())
+    .bind(input.schedule_id)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -302,15 +310,16 @@ pub fn validate_new(input: &NewTransaction) -> Result<()> {
             return Err(Error::InvalidInput("quantity must be positive".into()));
         }
     }
-    if input.txn_type == TransactionType::Sip {
+    if input.txn_type == TransactionType::Sip || input.txn_type == TransactionType::Swp {
         let amount = input
             .net_amount
             .or(input.gross_amount)
             .filter(|a| *a > 0.0);
         if amount.is_none() {
-            return Err(Error::InvalidInput(
-                "sip requires net_amount or gross_amount".into(),
-            ));
+            return Err(Error::InvalidInput(format!(
+                "{} requires net_amount or gross_amount",
+                input.txn_type.as_str()
+            )));
         }
     }
     Ok(())
@@ -367,6 +376,7 @@ fn row_to_transaction(row: &sqlx::sqlite::SqliteRow) -> Result<Transaction> {
         notes: row.try_get("notes")?,
         source: row.try_get("source")?,
         corporate_action_key: row.try_get("corporate_action_key")?,
+        schedule_id: row.try_get("schedule_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         labels: vec![],
@@ -438,6 +448,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -469,6 +480,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -499,6 +511,7 @@ mod tests {
             tds: None,
             eligible_quantity: None,
             notes: None,
+            schedule_id: None,
         };
         normalize_trade_amounts(&mut input);
         assert_eq!(input.net_amount, Some(1000.0));
@@ -544,6 +557,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
