@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::portfolio_api::{MfSearchHit, NewTransaction, Transaction, TransactionType};
+use crate::portfolio_api::{get_mf_scheme, MfSearchHit, NewTransaction, Transaction, TransactionType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
@@ -28,6 +28,21 @@ pub struct FormInitialState {
 pub fn form_initial_state(txn: &Transaction) -> FormInitialState {
     let sym = txn.symbol.clone().unwrap_or_default();
     let is_mf = sym.starts_with("MF:");
+    let selected_mf = if is_mf {
+        sym.strip_prefix("MF:")
+            .and_then(|code| code.parse::<i64>().ok())
+            .map(|scheme_code| MfSearchHit {
+                scheme_code,
+                scheme_name: sym.clone(),
+            })
+    } else {
+        None
+    };
+    let mf_query = if is_mf {
+        sym.clone()
+    } else {
+        String::new()
+    };
     FormInitialState {
         txn_type: txn.txn_type.clone(),
         trade_date: txn.trade_date.clone(),
@@ -37,8 +52,8 @@ pub fn form_initial_state(txn: &Transaction) -> FormInitialState {
             AssetKind::Stock
         },
         symbol: if is_mf { String::new() } else { sym.clone() },
-        mf_query: if is_mf { sym } else { String::new() },
-        selected_mf: None,
+        mf_query,
+        selected_mf,
         quantity: fmt_opt_f64(txn.quantity),
         price: fmt_opt_f64(txn.price),
         net_amount: fmt_opt_f64(txn.net_amount),
@@ -48,6 +63,12 @@ pub fn form_initial_state(txn: &Transaction) -> FormInitialState {
         bonus_den: fmt_opt_f64_or(txn.bonus_ratio_den, "1"),
         dividend_per_share: fmt_opt_f64(txn.dividend_per_share),
     }
+}
+
+/// Resolve scheme name for edit form when symbol is `MF:{code}`.
+pub async fn resolve_mf_for_edit(mf_query: String) -> Option<MfSearchHit> {
+    let code = mf_query.strip_prefix("MF:")?.parse().ok()?;
+    get_mf_scheme(code).await.ok()
 }
 
 fn fmt_opt_f64(v: Option<f64>) -> String {

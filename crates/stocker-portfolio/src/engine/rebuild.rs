@@ -224,7 +224,7 @@ pub async fn rebuild(pool: &SqlitePool, portfolio_id: i64) -> Result<RebuildResu
                 state.dividend_received += gross;
                 state.last_transaction_date = Some(txn.trade_date.clone());
             }
-            TransactionType::Sip => {}
+            TransactionType::Sip | TransactionType::Swp => {}
         }
     }
 
@@ -361,7 +361,7 @@ async fn load_transactions(pool: &SqlitePool, portfolio_id: i64) -> Result<Vec<T
         "SELECT id, user_id, portfolio_id, txn_type, trade_date, symbol, quantity, price,
          gross_amount, brokerage, taxes, net_amount, split_ratio_num, split_ratio_den,
          bonus_ratio_num, bonus_ratio_den, dividend_per_share, tds, eligible_quantity,
-         notes, source, corporate_action_key, created_at, updated_at
+         notes, source, corporate_action_key, schedule_id, created_at, updated_at
          FROM transactions WHERE portfolio_id = ? ORDER BY trade_date ASC, id ASC",
     )
     .bind(portfolio_id)
@@ -398,6 +398,7 @@ fn row_to_transaction(row: &sqlx::sqlite::SqliteRow) -> Result<Transaction> {
         notes: row.try_get("notes")?,
         source: row.try_get("source")?,
         corporate_action_key: row.try_get("corporate_action_key")?,
+        schedule_id: row.try_get("schedule_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         labels: vec![],
@@ -517,6 +518,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -544,6 +546,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -571,6 +574,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -620,6 +624,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -644,6 +649,7 @@ mod tests {
             tds: None,
             eligible_quantity: None,
             notes: None,
+            schedule_id: None,
         };
         transactions::create(&pool, user_id, &split_txn).await.unwrap();
 
@@ -682,6 +688,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -709,6 +716,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -747,6 +755,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -774,6 +783,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -812,6 +822,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -839,6 +850,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -877,6 +889,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -904,6 +917,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: Some(100.0),
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -942,6 +956,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -980,6 +995,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -1007,6 +1023,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -1045,6 +1062,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await
@@ -1073,6 +1091,7 @@ mod tests {
                     tds: None,
                     eligible_quantity: None,
                     notes: None,
+                    schedule_id: None,
                 },
             )
             .await
@@ -1107,6 +1126,7 @@ mod tests {
                 tds: None,
                 eligible_quantity: None,
                 notes: None,
+                schedule_id: None,
             },
         )
         .await

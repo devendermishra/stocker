@@ -14,7 +14,10 @@ pub mod models;
 pub mod portfolios;
 pub mod returns;
 pub mod service;
+pub mod mf_schedule;
+pub mod portfolio_refresh;
 pub mod sip_refresh;
+pub mod swp_refresh;
 pub mod transactions;
 
 pub use analytics::{allocations_by_label, allocations_by_stock, PortfolioView, PortfolioViewOptions};
@@ -28,5 +31,14 @@ pub use import::{
     RawGrid,
 };
 pub use service::PortfolioService;
+pub use mf_schedule::{
+    inactivate_schedule, list_mf_schedules, register_mf_schedule, refresh_active_schedules,
+};
+pub use portfolio_refresh::{
+    apply_portfolio_refresh, scan_portfolio_refresh, PendingSipMaterialization,
+    PendingSwpMaterialization, PortfolioRefreshApplyResult, PortfolioRefreshScan, ScanError,
+    SuggestedCorporateAction, SuggestedSipInstallment, SuggestedSwpInstallment,
+};
 pub use sip_refresh::{refresh_sip_transactions, SipRefreshFailure, SipRefreshResult};
+pub use swp_refresh::{refresh_swp_transactions, SwpRefreshFailure, SwpRefreshResult};
 pub use transactions::TransactionFilter;

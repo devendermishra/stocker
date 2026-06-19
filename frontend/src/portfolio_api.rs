@@ -89,6 +89,7 @@ pub enum TransactionType {
     Bonus,
     Rights,
     Sip,
+    Swp,
 }
 
 impl TransactionType {
@@ -104,8 +105,14 @@ impl TransactionType {
             "split" => Self::Split,
             "bonus" => Self::Bonus,
             "rights" => Self::Rights,
+            "sip" => Self::Sip,
+            "swp" => Self::Swp,
             _ => Self::Buy,
         }
+    }
+
+    pub fn is_schedule_type(self) -> bool {
+        matches!(self, Self::Sip | Self::Swp)
     }
 
     pub fn form_value(self) -> &'static str {
@@ -122,6 +129,7 @@ impl TransactionType {
             Self::Bonus => "bonus",
             Self::Rights => "rights",
             Self::Sip => "sip",
+            Self::Swp => "swp",
         }
     }
 
@@ -164,6 +172,8 @@ pub struct Transaction {
     pub notes: Option<String>,
     pub source: String,
     pub corporate_action_key: Option<String>,
+    #[serde(default)]
+    pub schedule_id: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]
@@ -190,6 +200,97 @@ pub struct NewTransaction {
     pub tds: Option<f64>,
     pub eligible_quantity: Option<f64>,
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleType {
+    Sip,
+    Swp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleStatus {
+    Active,
+    Inactive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MfSchedule {
+    pub id: i64,
+    pub user_id: i64,
+    pub portfolio_id: i64,
+    pub schedule_type: ScheduleType,
+    pub symbol: String,
+    pub scheme_name: Option<String>,
+    pub amount: f64,
+    pub start_date: String,
+    pub end_date: Option<String>,
+    pub installment_count: Option<i32>,
+    pub sip_day: i32,
+    pub status: ScheduleStatus,
+    pub registered_installments: i32,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterMfSchedule {
+    pub schedule_type: ScheduleType,
+    pub symbol: String,
+    pub amount: f64,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub installment_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleFailure {
+    pub trade_date: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterMfScheduleResult {
+    pub schedule_id: i64,
+    pub registered: Vec<i64>,
+    pub materialized: Vec<i64>,
+    pub skipped_months: Vec<String>,
+    pub status: ScheduleStatus,
+    pub failed: Vec<ScheduleFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwpRefreshFailure {
+    pub swp_id: i64,
+    pub symbol: Option<String>,
+    pub trade_date: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwpRefreshResult {
+    pub created: Vec<i64>,
+    pub skipped: Vec<i64>,
+    pub failed: Vec<SwpRefreshFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingSwpMaterialization {
+    pub suggestion_id: String,
+    pub swp_id: i64,
+    pub symbol: String,
+    pub trade_date: String,
+    pub amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestedSwpInstallment {
+    pub suggestion_id: String,
+    pub symbol: String,
+    pub trade_date: String,
+    pub amount: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -288,6 +389,7 @@ pub struct TransactionFilter {
     pub limit: Option<i64>,
     /// `"equity"` or `"mutual_fund"`
     pub asset_class: Option<String>,
+    pub schedule_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,6 +572,67 @@ pub struct SipRefreshResult {
     pub created: Vec<i64>,
     pub skipped: Vec<i64>,
     pub failed: Vec<SipRefreshFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanError {
+    pub symbol: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestedCorporateAction {
+    pub suggestion_id: String,
+    pub symbol: String,
+    pub txn_type: String,
+    pub trade_date: String,
+    pub dividend_per_share: Option<f64>,
+    pub eligible_quantity: Option<f64>,
+    pub gross_amount: Option<f64>,
+    pub split_ratio_num: Option<f64>,
+    pub split_ratio_den: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingSipMaterialization {
+    pub suggestion_id: String,
+    pub sip_id: i64,
+    pub symbol: String,
+    pub trade_date: String,
+    pub amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestedSipInstallment {
+    pub suggestion_id: String,
+    pub symbol: String,
+    pub trade_date: String,
+    pub amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioRefreshScan {
+    pub corporate_actions: Vec<SuggestedCorporateAction>,
+    pub sip_pending: Vec<PendingSipMaterialization>,
+    pub sip_suggested: Vec<SuggestedSipInstallment>,
+    pub swp_pending: Vec<PendingSwpMaterialization>,
+    pub swp_suggested: Vec<SuggestedSwpInstallment>,
+    pub scan_errors: Vec<ScanError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioRefreshApplyResult {
+    pub corporate_actions_created: usize,
+    pub sip_registered: usize,
+    pub sip_materialized: usize,
+    pub swp_registered: usize,
+    pub swp_materialized: usize,
+    pub failed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioRefreshApplyRequest {
+    pub selections: Vec<String>,
 }
 
 #[cfg(all(feature = "web", not(feature = "desktop")))]
@@ -722,6 +885,82 @@ pub async fn refresh_sip_transactions(portfolio_id: i64) -> Result<SipRefreshRes
 }
 
 #[cfg(all(feature = "web", not(feature = "desktop")))]
+pub async fn scan_portfolio_refresh(portfolio_id: i64) -> Result<PortfolioRefreshScan, String> {
+    let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/refresh/scan");
+    let text = api_request("POST", &path, None::<&()>).await?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+pub async fn apply_portfolio_refresh(
+    portfolio_id: i64,
+    selections: &[String],
+) -> Result<PortfolioRefreshApplyResult, String> {
+    let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/refresh/apply");
+    let body = PortfolioRefreshApplyRequest {
+        selections: selections.to_vec(),
+    };
+    let text = api_request("POST", &path, Some(&body)).await?;
+    let result: PortfolioRefreshApplyResult =
+        serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if result.corporate_actions_created > 0
+        || result.sip_registered > 0
+        || result.sip_materialized > 0
+        || result.swp_registered > 0
+        || result.swp_materialized > 0
+    {
+        crate::portfolio_data_revision::bump_portfolio_data_revision();
+    }
+    Ok(result)
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+pub async fn refresh_swp_transactions(portfolio_id: i64) -> Result<SwpRefreshResult, String> {
+    let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/swp/refresh");
+    let text = api_request("POST", &path, None::<&()>).await?;
+    let result: SwpRefreshResult = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if !result.created.is_empty() {
+        crate::portfolio_data_revision::bump_portfolio_data_revision();
+    }
+    Ok(result)
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+pub async fn register_mf_schedule(
+    portfolio_id: i64,
+    input: &RegisterMfSchedule,
+) -> Result<RegisterMfScheduleResult, String> {
+    let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/mf-schedule");
+    let text = api_request("POST", &path, Some(input)).await?;
+    let result: RegisterMfScheduleResult = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if !result.registered.is_empty() || !result.materialized.is_empty() {
+        crate::portfolio_data_revision::bump_portfolio_data_revision();
+    }
+    Ok(result)
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+pub async fn list_mf_schedules(portfolio_id: i64) -> Result<Vec<MfSchedule>, String> {
+    let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/mf-schedules");
+    let text = api_request("GET", &path, None::<&()>).await?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+pub async fn inactivate_mf_schedule(schedule_id: i64) -> Result<MfSchedule, String> {
+    let path = format!("/api/v1/portfolio/mf-schedules/{schedule_id}/inactivate");
+    let text = api_request("POST", &path, None::<&()>).await?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+pub async fn get_mf_scheme(scheme_code: i64) -> Result<MfSearchHit, String> {
+    let path = format!("/api/v1/portfolio/mf/schemes/{scheme_code}");
+    let text = api_request("GET", &path, None::<&()>).await?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
 pub async fn fifo_lots(portfolio_id: i64, symbol: &str) -> Result<Vec<FifoLot>, String> {
     let path = format!(
         "/api/v1/portfolio/portfolios/{portfolio_id}/stock/{}/lots",
@@ -830,6 +1069,7 @@ pub fn txn_type_label(t: &TransactionType) -> &'static str {
         TransactionType::Bonus => "Bonus",
         TransactionType::Rights => "Rights",
         TransactionType::Sip => "SIP Investment",
+        TransactionType::Swp => "SWP Withdrawal",
     }
 }
 

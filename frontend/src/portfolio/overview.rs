@@ -2,12 +2,16 @@ use dioxus::prelude::*;
 
 use crate::portfolio::dashboard::{return_pct_label, SummaryCard};
 use crate::portfolio::layout::{AuthGuard, PortfolioNav, PortfolioTab};
+use crate::portfolio::refresh_modal::PortfolioRefreshModal;
 use crate::portfolio_api::{dashboard, fmt_inr, fmt_pct, fmt_return_pct, txn_type_label};
 use crate::portfolio_data_revision::portfolio_data_revision;
 use crate::routes::Route;
 
 #[component]
 pub fn PortfolioOverview(id: i64) -> Element {
+    let mut show_refresh = use_signal(|| false);
+    let mut refresh_msg = use_signal(|| None::<String>);
+
     let dash = use_resource(move || {
         let _ = portfolio_data_revision();
         async move { dashboard(id).await }
@@ -19,6 +23,23 @@ pub fn PortfolioOverview(id: i64) -> Element {
                 Link { to: Route::PortfolioList {}, style: "color: #1a56db;", "← Portfolios" }
             }
             PortfolioNav { id, active: PortfolioTab::Overview }
+            div { style: "display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;",
+                button {
+                    style: "padding: 0.45rem 0.75rem; border: 1px solid #1a56db; border-radius: 8px; background: #fff; color: #1a56db; cursor: pointer; font-size: 0.85rem;",
+                    onclick: move |_| show_refresh.set(true),
+                    "Refresh portfolio"
+                }
+            }
+            if let Some(msg) = refresh_msg() {
+                p { style: "color: #1b5e20; margin-bottom: 0.75rem;", "{msg}" }
+            }
+            if show_refresh() {
+                PortfolioRefreshModal {
+                    portfolio_id: id,
+                    on_close: move |_| show_refresh.set(false),
+                    on_applied: move |msg: String| refresh_msg.set(Some(msg)),
+                }
+            }
             match &*dash.read_unchecked() {
                 None => rsx! { p { "Loading…" } },
                 Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },

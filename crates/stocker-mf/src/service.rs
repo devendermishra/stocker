@@ -178,6 +178,53 @@ impl MfService {
             })
     }
 
+    /// Scheme metadata (name) from local cache; does not require NAV.
+    pub async fn load_scheme_meta(&self, scheme_code: i64) -> Result<NavSnapshot> {
+        if let Some(cached) = self.load_cached_nav(scheme_code).await? {
+            return Ok(cached);
+        }
+        let row = sqlx::query(
+            "SELECT scheme_code, scheme_name, fund_house, scheme_category FROM mf_schemes WHERE scheme_code = ?",
+        )
+        .bind(scheme_code)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(r) = row {
+            return Ok(NavSnapshot {
+                scheme_code: r.try_get("scheme_code").unwrap_or(scheme_code),
+                scheme_name: r.try_get("scheme_name").unwrap_or_default(),
+                fund_house: r.try_get("fund_house").ok(),
+                scheme_category: r.try_get("scheme_category").ok(),
+                nav: 0.0,
+                nav_date: String::new(),
+                fetched_at: 0,
+            });
+        }
+
+        let path = default_scheme_list_cache_path();
+        if path.is_file() {
+            if let Ok(bytes) = std::fs::read(&path) {
+                if let Ok(entries) = serde_json::from_slice::<Vec<SchemeListEntry>>(&bytes) {
+                    if let Some(entry) = entries.into_iter().find(|e| e.scheme_code == scheme_code)
+                    {
+                        return Ok(NavSnapshot {
+                            scheme_code,
+                            scheme_name: entry.scheme_name,
+                            fund_house: None,
+                            scheme_category: None,
+                            nav: 0.0,
+                            nav_date: String::new(),
+                            fetched_at: 0,
+                        });
+                    }
+                }
+            }
+        }
+
+        Err(Error::NotFound(format!("scheme {scheme_code} not found")))
+    }
+
     async fn load_cached_nav(&self, scheme_code: i64) -> Result<Option<NavSnapshot>> {
         let row = sqlx::query(
             r#"

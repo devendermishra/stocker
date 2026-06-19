@@ -10,8 +10,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use stocker_portfolio::{
     Error as PortfolioError, ImportApplyRequest, ImportParseBody, LabelEntityType, NewLabel,
-    NewPortfolio, NewTransaction, PortfolioService, PortfolioViewOptions, TransactionFilter,
-    UpdatePortfolio,
+    NewPortfolio, NewTransaction, PortfolioService, PortfolioViewOptions, RegisterMfSchedule,
+    TransactionFilter, UpdatePortfolio,
 };
 
 #[derive(Clone)]
@@ -86,6 +86,34 @@ pub fn router(service: Arc<PortfolioService>) -> Router {
         .route(
             "/api/v1/portfolio/portfolios/{id}/sip/refresh",
             post(refresh_sip_transactions),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/swp/refresh",
+            post(refresh_swp_transactions),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/mf-schedule",
+            post(register_mf_schedule),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/mf-schedules",
+            get(list_mf_schedules),
+        )
+        .route(
+            "/api/v1/portfolio/mf-schedules/{id}/inactivate",
+            post(inactivate_mf_schedule),
+        )
+        .route(
+            "/api/v1/portfolio/mf/schemes/{code}",
+            get(get_mf_scheme),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/refresh/scan",
+            post(scan_portfolio_refresh),
+        )
+        .route(
+            "/api/v1/portfolio/portfolios/{id}/refresh/apply",
+            post(apply_portfolio_refresh),
         )
         .route(
             "/api/v1/portfolio/portfolios/{id}/transactions/clear",
@@ -503,6 +531,75 @@ async fn refresh_sip_transactions(State(s): State<PortfolioState>, Path(id): Pat
         Err(e) => return e,
     };
     portfolio_response(s.service.refresh_sip_transactions(user.id, id).await)
+}
+
+async fn refresh_swp_transactions(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(s.service.refresh_swp_transactions(user.id, id).await)
+}
+
+async fn register_mf_schedule(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Json(body): Json<RegisterMfSchedule>,
+) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(s.service.register_mf_schedule(user.id, id, &body).await)
+}
+
+async fn list_mf_schedules(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(s.service.list_mf_schedules(user.id, id).await)
+}
+
+async fn inactivate_mf_schedule(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(s.service.inactivate_mf_schedule(user.id, id).await)
+}
+
+async fn get_mf_scheme(State(s): State<PortfolioState>, Path(code): Path<i64>) -> Response {
+    portfolio_response(s.service.get_mf_scheme(code).await)
+}
+
+#[derive(Deserialize)]
+struct PortfolioRefreshApplyBody {
+    selections: Vec<String>,
+}
+
+async fn scan_portfolio_refresh(State(s): State<PortfolioState>, Path(id): Path<i64>) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(s.service.scan_portfolio_refresh(user.id, id).await)
+}
+
+async fn apply_portfolio_refresh(
+    State(s): State<PortfolioState>,
+    Path(id): Path<i64>,
+    Json(body): Json<PortfolioRefreshApplyBody>,
+) -> Response {
+    let user = match local_user(&s).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    portfolio_response(
+        s.service
+            .apply_portfolio_refresh(user.id, id, &body.selections)
+            .await,
+    )
 }
 
 async fn clear_portfolio_transactions(

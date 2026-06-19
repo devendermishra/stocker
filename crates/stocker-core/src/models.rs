@@ -479,6 +479,25 @@ pub struct ChartHistory {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ChartDividendEvent {
+    pub date: String,
+    pub amount: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ChartSplitEvent {
+    pub date: String,
+    pub numerator: f64,
+    pub denominator: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ChartEvents {
+    pub dividends: Vec<ChartDividendEvent>,
+    pub splits: Vec<ChartSplitEvent>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct IncomeStatementRow {
     pub end_date_fmt: String,
     pub end_ts: Option<i64>,
