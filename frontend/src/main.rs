@@ -19,8 +19,25 @@ mod routes;
 mod screener;
 mod screener_api;
 mod stocks;
+mod sync;
+mod sync_api;
+mod sync_oauth_modal;
 mod types;
 
 fn main() {
+    #[cfg(feature = "desktop")]
+    {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            match stocker_sync::startup_pull_if_newer().await {
+                Ok(Some(action)) => eprintln!("Startup sync: {action:?}"),
+                Ok(None) => {}
+                Err(e) => eprintln!("Startup sync skipped: {e}"),
+            }
+        });
+    }
     dioxus::launch(app::app);
 }

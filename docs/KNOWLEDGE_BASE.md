@@ -211,6 +211,55 @@ Research API (same server): `GET /api/v1/symbols/{symbol}/report`, `GET /health`
 | `SCREENER_BURST_PAUSE_EVERY_N` | `50` | Extra pause after every N symbols |
 | `SCREENER_BURST_PAUSE_MS` | `15000` | Length of burst pause (ms) |
 | `SCREENER_UNIVERSE_SYNC_INTERVAL_SECS` | `86400` | Re-load `STOCKER_UNIVERSE_CSV` when set |
+| `STOCKER_PORTFOLIO_DB_PATH` | `./portfolio.db` (or nearest existing file) | Portfolio SQLite location |
+| `STOCKER_GOOGLE_CLIENT_ID` | *(unset)* | Google OAuth desktop client ID for Drive sync (dev bypass; skips encrypted vault) |
+| `STOCKER_GOOGLE_CLIENT_SECRET` | *(unset)* | Google OAuth desktop client secret for Drive sync (dev bypass) |
+| `STOCKER_CONFIG_DIR` | `~/.config/stocker` (platform-specific) | Encrypted sync vault, legacy tokens, and sync state |
+
+---
+
+## Google Drive database sync
+
+Sync **`portfolio.db`** and **`stocker.db`** between devices via a single backup zip in your Google Drive **app data folder** (hidden from the normal Drive UI). `mf.db` is not synced (MF NAV cache; refresh locally).
+
+### One-time Google Cloud setup
+
+1. Create a project in [Google Cloud Console](https://console.cloud.google.com/).
+2. Enable the **Google Drive API**.
+3. Create **OAuth client ID** → Application type **Desktop app**.
+4. Add redirect URI `http://127.0.0.1` (the app binds a random port at auth time; Google accepts loopback redirects for desktop clients).
+5. **Desktop app (recommended):** open **Sync** in the app → the setup dialog collects client ID, client secret, and a **master password**. All sync secrets (OAuth credentials, Google tokens, sync state) are stored in an encrypted vault at `~/.config/stocker/sync_vault.enc` (Argon2id + ChaCha20-Poly1305). Unlock the vault each session before signing in or syncing.
+6. On the OAuth consent screen configuration, add scope **`https://www.googleapis.com/auth/drive.appdata`** (Data from Google Drive apps) and enable the **Google Drive API** under APIs & Services.
+7. **Dev bypass (optional):** set `STOCKER_GOOGLE_CLIENT_ID` and `STOCKER_GOOGLE_CLIENT_SECRET` env vars — credentials are not encrypted and legacy plaintext token/state files are used until you migrate via the setup dialog.
+
+Legacy plaintext files (`google_oauth.json`, `google_tokens.json`, `sync_state.json`) are imported into the vault on first setup or unlock, then deleted.
+
+### CLI workflow
+
+```bash
+# Sign in (opens browser)
+cargo run -p stocker-cli -- sync auth
+
+# Check local vs remote timestamps
+cargo run -p stocker-cli -- sync status
+
+# Smart sync: pull if Drive is newer, else push if local changed
+cargo run -p stocker-cli -- sync run
+
+# Force upload or download
+cargo run -p stocker-cli -- sync push --force
+cargo run -p stocker-cli -- sync pull --force
+```
+
+Close the desktop app before `sync pull` from the CLI (database files must not be open). The desktop app runs an automatic pull on startup when Drive has a newer backup.
+
+### Multi-device workflow
+
+1. **Device A** — use the app, then `sync run` (or **Sync now** on the home page → **Sync**).
+2. **Device B** — launch the desktop app (startup pull) or run `sync run`.
+3. If both devices edited since the last sync, status shows a **conflict** — choose `sync push --force` or `sync pull --force`.
+
+Local encrypted vault: `~/.config/stocker/sync_vault.enc`. Legacy plaintext paths are migrated automatically on vault setup/unlock.
 
 ---
 
@@ -235,6 +284,7 @@ Supported CSV shapes: NSE `EQUITY_L.csv` (`SYMBOL`, optional `SERIES=EQ`), or a 
 | Research report | HTTP → `stocker-api` | In-process `stocker_core` |
 | Screener search / saved screens | HTTP → `stocker-api` | In-process `stocker_screener` |
 | Screener refresh scheduler | Started by API on boot | Started when screener page opens |
+| Google Drive DB sync | No | Yes (CLI + Sync page; startup pull) |
 | Requires API server | Yes | No |
 | Cargo feature | `web` (default) | `desktop` |
 
@@ -263,6 +313,10 @@ Central switch: `frontend/src/api.rs` (research) and `frontend/src/screener_api.
 | WASM screener errors / CORS | API not running | Start `stocker-api` first |
 | "Already running" on refresh | Backfill in progress | Wait for current job; status shows `backfill_running` |
 | Only ~508 symbols | No universe CSV | Set `STOCKER_UNIVERSE_CSV` and run `universe` |
+| Drive sync upload 403 | Missing `drive.appdata` scope on token, or Drive API disabled | Enable Drive API; add `drive.appdata` to OAuth consent screen scopes; use **Sign out** then **Sign in with Google** on Sync page |
+| Drive sync auth fails | Missing OAuth credentials or vault locked | Use Sync page setup dialog, or set env vars; unlock vault with master password |
+| Drive sync pull fails (CLI) | DB files open | Close desktop app, then `sync pull` |
+| Drive sync conflict | Both devices edited | `sync push --force` or `sync pull --force` |
 | `dx` not found | Dioxus CLI missing | `cargo install dioxus-cli --locked` |
 
 ---

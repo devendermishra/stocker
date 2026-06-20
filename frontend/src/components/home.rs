@@ -115,6 +115,11 @@ pub fn Home(id: String, exchange: String) -> Element {
                     style: "padding: 0.55rem 1rem; background: #fff; color: #184ad8; border: 1px solid #184ad8; border-radius: 8px; text-decoration: none; font-weight: 600;",
                     "Portfolio"
                 }
+                Link {
+                    to: Route::DriveSync {},
+                    style: "padding: 0.55rem 1rem; background: #fff; color: #184ad8; border: 1px solid #184ad8; border-radius: 8px; text-decoration: none; font-weight: 600;",
+                    "Sync"
+                }
             }
             if !can_report {
                 p { style: "color: #b00020; font-size: 0.88rem; margin-top: 0.5rem;",
