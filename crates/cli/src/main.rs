@@ -75,6 +75,34 @@ enum Command {
         #[arg(short, long)]
         db: Option<PathBuf>,
     },
+    /// Sync portfolio.db and stocker.db with Google Drive
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SyncCommand {
+    /// Sign in to Google Drive (OAuth desktop flow)
+    Auth,
+    /// Show local vs remote sync status
+    Status,
+    /// Upload local databases to Google Drive
+    Push {
+        #[arg(long)]
+        force: bool,
+    },
+    /// Download and restore databases from Google Drive
+    Pull {
+        #[arg(long)]
+        force: bool,
+    },
+    /// Smart sync: pull if remote is newer, else push if local changed
+    Run {
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -133,6 +161,11 @@ async fn main() {
         }
         Command::RecomputeComposites { db } => {
             if let Err(code) = run_recompute_composites(db.as_deref()).await {
+                std::process::exit(code);
+            }
+        }
+        Command::Sync { command } => {
+            if let Err(code) = run_sync(command).await {
                 std::process::exit(code);
             }
         }
@@ -345,4 +378,46 @@ async fn run_refresh(symbol: &str, db: Option<&Path>) -> Result<(), i32> {
     })?;
     eprintln!("Refreshed {}", symbol);
     Ok(())
+}
+
+async fn run_sync(command: SyncCommand) -> Result<(), i32> {
+    use stocker_sync::{SyncAction, auth, pull, push, status, sync};
+
+    let map_err = |e: stocker_sync::Error| {
+        eprintln!("Sync error: {e}");
+        1
+    };
+
+    match command {
+        SyncCommand::Auth => auth().await.map_err(map_err),
+        SyncCommand::Status => {
+            let st = status().await.map_err(map_err)?;
+            println!("{}", serde_json::to_string_pretty(&st).unwrap());
+            Ok(())
+        }
+        SyncCommand::Push { force } => {
+            match push(force).await.map_err(map_err)? {
+                SyncAction::Pushed => eprintln!("Pushed backup to Google Drive."),
+                SyncAction::AlreadyInSync => eprintln!("Already in sync — nothing to push."),
+                SyncAction::Pulled => {}
+            }
+            Ok(())
+        }
+        SyncCommand::Pull { force } => {
+            match pull(force).await.map_err(map_err)? {
+                SyncAction::Pulled => eprintln!("Restored databases from Google Drive."),
+                SyncAction::AlreadyInSync => eprintln!("Already in sync — nothing to pull."),
+                SyncAction::Pushed => {}
+            }
+            Ok(())
+        }
+        SyncCommand::Run { force } => {
+            match sync(force).await.map_err(map_err)? {
+                SyncAction::Pulled => eprintln!("Pulled newer backup from Google Drive."),
+                SyncAction::Pushed => eprintln!("Pushed local backup to Google Drive."),
+                SyncAction::AlreadyInSync => eprintln!("Already in sync."),
+            }
+            Ok(())
+        }
+    }
 }

@@ -5,6 +5,7 @@ members = [
     "crates/stocker-screener",
     "crates/stocker-mf",
     "crates/stocker-portfolio",
+    "crates/stocker-sync",
     "crates/api",
     "crates/cli",
     "frontend",

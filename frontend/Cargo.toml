@@ -24,6 +24,7 @@ desktop = [
     "dep:stocker-screener",
     "dep:stocker-mf",
     "dep:stocker-portfolio",
+    "dep:stocker-sync",
     "dep:tokio",
 ]
 
@@ -45,4 +46,5 @@ stocker-core = { path = "../crates/stocker-core", optional = true }
 stocker-screener = { path = "../crates/stocker-screener", optional = true }
 stocker-mf = { path = "../crates/stocker-mf", optional = true }
 stocker-portfolio = { path = "../crates/stocker-portfolio", optional = true }
-tokio = { version = "1", features = ["sync", "time"], optional = true }
+stocker-sync = { path = "../crates/stocker-sync", optional = true }
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros"], optional = true }

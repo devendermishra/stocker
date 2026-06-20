@@ -8,6 +8,7 @@ use crate::portfolio::{
 use crate::report::Report;
 use crate::screener::Screener;
 use crate::stocks::Stocks;
+use crate::sync::DriveSync;
 
 #[derive(Clone, Routable, Debug, PartialEq)]
 pub enum Route {
@@ -19,6 +20,8 @@ pub enum Route {
     Screener {},
     #[route("/stocks")]
     Stocks {},
+    #[route("/sync")]
+    DriveSync {},
     #[route("/portfolio")]
     PortfolioList {},
     #[route("/portfolio/labels")]
