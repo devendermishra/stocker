@@ -7,7 +7,7 @@ pub use desktop::*;
 mod desktop {
     use stocker_sync::{
         OAuthConfig, SyncStatus, VaultStatus, auth, lock_vault, logout, pull, push, setup_vault,
-        status, sync, unlock_vault, vault_status,
+        startup_pull_if_newer, status, sync, unlock_vault, vault_status,
     };
 
     pub async fn sync_status() -> Result<SyncStatus, String> {
@@ -36,6 +36,13 @@ mod desktop {
         pull(force)
             .await
             .map(|a| format!("{a:?}"))
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn sync_startup_pull() -> Result<Option<String>, String> {
+        startup_pull_if_newer()
+            .await
+            .map(|action| action.map(|a| format!("{a:?}")))
             .map_err(|e| e.to_string())
     }
 
@@ -82,6 +89,14 @@ mod desktop {
             .map_err(|e| e.to_string())?;
         std::process::exit(0);
     }
+
+    /// Pull replaces database files on disk; restart so in-memory pools reload them.
+    pub fn schedule_restart_after_pull() {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = restart_app();
+        });
+    }
 }
 
 #[cfg(not(feature = "desktop"))]
@@ -125,6 +140,10 @@ mod stub {
         Err("Google Drive sync is available in the desktop app only".into())
     }
 
+    pub async fn sync_startup_pull() -> Result<Option<String>, String> {
+        Err("Google Drive sync is available in the desktop app only".into())
+    }
+
     pub fn sync_vault_status() -> VaultStatus {
         VaultStatus {
             configured: false,
@@ -159,6 +178,8 @@ mod stub {
     pub fn restart_app() -> Result<(), String> {
         Err("Restart is only available in the desktop app".into())
     }
+
+    pub fn schedule_restart_after_pull() {}
 }
 
 #[cfg(not(feature = "desktop"))]

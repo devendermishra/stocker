@@ -9,7 +9,8 @@ use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
 use crate::config::{
-    MANIFEST_FILENAME, PORTFOLIO_DB_NAME, SCREENER_DB_NAME, portfolio_db_path, screener_db_path,
+    MANIFEST_FILENAME, PORTFOLIO_DB_NAME, SCREENER_DB_NAME, pending_restore_path,
+    portfolio_db_path, screener_db_path,
 };
 use crate::error::{Error, Result};
 use crate::manifest::{SyncManifest, file_entry, sha256_hex};
@@ -48,6 +49,21 @@ pub async fn snapshot_db(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Snapshot for backup; fall back to copying the db file when it is open elsewhere (desktop app).
+async fn snapshot_or_copy_db(source: &Path, dest: &Path) -> Result<()> {
+    match snapshot_db(source, dest).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!(
+                "Drive backup: snapshot of {} failed ({e}); copying database file",
+                source.display()
+            );
+            stocker_core::paths::copy_sqlite_files(source, dest)
+                .map_err(|io| Error::Other(format!("copy {}: {io}", source.display())))
+        }
+    }
+}
+
 pub async fn create_archive(device_id: Uuid, dest_zip: &Path) -> Result<SyncManifest> {
     let temp_dir = tempfile::tempdir()?;
     let portfolio_snap = temp_dir.path().join(PORTFOLIO_DB_NAME);
@@ -56,11 +72,24 @@ pub async fn create_archive(device_id: Uuid, dest_zip: &Path) -> Result<SyncMani
     let portfolio_src = portfolio_db_path();
     let screener_src = screener_db_path();
 
+    if !portfolio_src.is_file() {
+        eprintln!(
+            "Drive backup: portfolio database not found at {} — portfolio data will not be included",
+            portfolio_src.display()
+        );
+    }
+    if !screener_src.is_file() {
+        eprintln!(
+            "Drive backup: screener database not found at {} — screener data will not be included",
+            screener_src.display()
+        );
+    }
+
     if portfolio_src.is_file() {
-        snapshot_db(&portfolio_src, &portfolio_snap).await?;
+        snapshot_or_copy_db(&portfolio_src, &portfolio_snap).await?;
     }
     if screener_src.is_file() {
-        snapshot_db(&screener_src, &screener_snap).await?;
+        snapshot_or_copy_db(&screener_src, &screener_snap).await?;
     }
 
     let mut files = BTreeMap::new();
@@ -127,6 +156,35 @@ pub fn read_manifest_from_zip(zip_path: &Path) -> Result<SyncManifest> {
     SyncManifest::from_json(&text)
 }
 
+/// True when both database files can be renamed (not open in another process).
+pub fn databases_replaceable() -> bool {
+    for path in [portfolio_db_path(), screener_db_path()] {
+        if !path.is_file() {
+            continue;
+        }
+        let backup = path.with_extension("db.bak");
+        if std::fs::rename(&path, &backup).is_err() {
+            return false;
+        }
+        if std::fs::rename(&backup, &path).is_err() {
+            let _ = std::fs::rename(&backup, &path);
+            return false;
+        }
+    }
+    true
+}
+
+/// Restore a deferred backup saved while the app had databases open.
+pub fn apply_pending_restore_if_any() -> Result<Option<SyncManifest>> {
+    let path = pending_restore_path();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let manifest = restore_archive(&path)?;
+    std::fs::remove_file(&path)?;
+    Ok(Some(manifest))
+}
+
 pub fn restore_archive(zip_path: &Path) -> Result<SyncManifest> {
     let manifest = read_manifest_from_zip(zip_path)?;
 
@@ -167,7 +225,16 @@ fn restore_one_db(dest: &Path, bytes: &[u8]) -> Result<()> {
 
     let backup = dest.with_extension("db.bak");
     if dest.is_file() {
-        std::fs::rename(dest, &backup)?;
+        std::fs::rename(dest, &backup).map_err(|e| {
+            if e.raw_os_error() == Some(32) || e.kind() == std::io::ErrorKind::PermissionDenied {
+                Error::Other(format!(
+                    "cannot replace {} — close the Stocker app (or any process using it) and try again",
+                    dest.display()
+                ))
+            } else {
+                Error::Io(e)
+            }
+        })?;
     }
 
     let temp = dest.with_extension("db.new");
@@ -225,19 +292,16 @@ mod tests {
         let manifest = create_archive(Uuid::new_v4(), &zip_path).await.unwrap();
         assert_eq!(manifest.files.len(), 2);
 
-        sqlx::query("DELETE FROM t")
-            .execute(
-                &SqlitePoolOptions::new()
-                    .max_connections(1)
-                    .connect_with(
-                        SqliteConnectOptions::from_str(&format!("sqlite://{}", portfolio.display()))
-                            .unwrap(),
-                    )
-                    .await
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str(&format!("sqlite://{}", portfolio.display()))
                     .unwrap(),
             )
             .await
             .unwrap();
+        sqlx::query("DELETE FROM t").execute(&pool).await.unwrap();
+        pool.close().await;
 
         restore_archive(&zip_path).unwrap();
 

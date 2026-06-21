@@ -54,51 +54,7 @@ pub async fn open_memory() -> Result<SqlitePool> {
     Ok(pool)
 }
 
-/// Default portfolio DB path.
+/// Default portfolio DB path (`STOCKER_PORTFOLIO_DB_PATH`, then `%APPDATA%/stocker/portfolio.db`, then legacy search).
 pub fn default_db_path() -> PathBuf {
-    if let Ok(env_path) = std::env::var("STOCKER_PORTFOLIO_DB_PATH") {
-        return PathBuf::from(env_path);
-    }
-    if let Some(found) = find_existing_db_path() {
-        return found;
-    }
-    PathBuf::from(DB_FILE_NAME)
-}
-
-fn find_in_ancestors(start: &Path, max_up: usize) -> Option<PathBuf> {
-    let mut dir = start.to_path_buf();
-    for _ in 0..=max_up {
-        let candidate = dir.join(DB_FILE_NAME);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    None
-}
-
-fn find_existing_db_path() -> Option<PathBuf> {
-    if let Ok(cwd) = std::env::current_dir() {
-        let in_cwd = cwd.join(DB_FILE_NAME);
-        if in_cwd.is_file() {
-            return Some(in_cwd);
-        }
-        if let Some(found) = find_in_ancestors(&cwd, 6) {
-            return Some(found);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let beside_exe = exe_dir.join(DB_FILE_NAME);
-            if beside_exe.is_file() {
-                return Some(beside_exe);
-            }
-            if let Some(found) = find_in_ancestors(exe_dir, 6) {
-                return Some(found);
-            }
-        }
-    }
-    None
+    stocker_core::paths::resolve_data_file_path("STOCKER_PORTFOLIO_DB_PATH", DB_FILE_NAME)
 }

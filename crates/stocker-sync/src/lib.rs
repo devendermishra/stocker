@@ -10,8 +10,9 @@ pub mod vault;
 
 pub use config::{
     BACKUP_FILENAME, MANIFEST_FILENAME, PORTFOLIO_DB_NAME, SCREENER_DB_NAME, config_dir,
-    portfolio_db_path, screener_db_path, OAuthConfig,
+    pending_restore_path, portfolio_db_path, screener_db_path, OAuthConfig,
 };
+pub use backup::{apply_pending_restore_if_any, databases_replaceable};
 pub use error::{Error, Result};
 pub use oauth::{clear_authentication, is_authenticated};
 pub use service::{
