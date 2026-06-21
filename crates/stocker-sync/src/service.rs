@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::backup::{create_archive, restore_archive};
+use crate::backup::{apply_pending_restore_if_any, create_archive, databases_replaceable, read_manifest_from_zip, restore_archive};
 use crate::config::max_db_mtime;
-use crate::config::OAuthConfig;
+use crate::config::{pending_restore_path, portfolio_db_path, OAuthConfig};
 use crate::drive::{DriveClient, RemoteBackupInfo};
 use crate::error::{Error, Result};
 use crate::oauth::{authenticate, clear_authentication, is_authenticated};
@@ -35,6 +35,10 @@ pub struct SyncStatus {
     pub remote_size: Option<u64>,
     pub local_changed: bool,
     pub recommendation: SyncRecommendation,
+    pub portfolio_db_path: String,
+    pub portfolio_db_present: bool,
+    pub last_backup_files: Vec<String>,
+    pub remote_backup_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +57,11 @@ pub fn decide(
     match remote_exported_at {
         None => SyncRecommendation::FirstPush,
         Some(remote_ts) => {
-            let baseline = baseline_at.unwrap_or(DateTime::<Utc>::MIN_UTC);
+            // Fresh device: local DBs exist but this install has never synced.
+            if baseline_at.is_none() {
+                return SyncRecommendation::Pull;
+            }
+            let baseline = baseline_at.unwrap();
             if remote_ts > baseline && local_changed {
                 SyncRecommendation::Conflict
             } else if remote_ts > baseline {
@@ -81,24 +89,27 @@ pub async fn status() -> Result<SyncStatus> {
 
     let authenticated = vs.unlocked && is_authenticated();
 
-    let (remote_exported_at, remote_modified_at, remote_size) = if authenticated {
-        let drive = DriveClient::new();
-        let remote = match state.drive_file_id.as_deref() {
-            Some(id) => drive.remote_info(id).await.ok(),
-            None => drive.find_backup().await.ok().flatten(),
-        };
-        match remote {
-            Some(info) => {
-                let exported = info.exported_at.or(Some(info.modified_time));
-                (exported, Some(info.modified_time), Some(info.size))
+    let (remote_exported_at, remote_modified_at, remote_size, remote_backup_files) =
+        if authenticated {
+            let drive = DriveClient::new();
+            let remote = match state.drive_file_id.as_deref() {
+                Some(id) => drive.remote_info(id).await.ok(),
+                None => drive.find_backup().await.ok().flatten(),
+            };
+            match remote {
+                Some(info) => {
+                    let exported = info.exported_at.or(Some(info.modified_time));
+                    let files = inspect_remote_backup_files(&drive, &info).await;
+                    (exported, Some(info.modified_time), Some(info.size), files)
+                }
+                None => (None, None, None, Vec::new()),
             }
-            None => (None, None, None),
-        }
-    } else {
-        (None, None, None)
-    };
+        } else {
+            (None, None, None, Vec::new())
+        };
 
     let recommendation = decide(baseline_at, local_changed, remote_exported_at);
+    let portfolio_path = portfolio_db_path();
 
     Ok(SyncStatus {
         authenticated,
@@ -114,7 +125,37 @@ pub async fn status() -> Result<SyncStatus> {
         remote_size,
         local_changed,
         recommendation,
+        portfolio_db_path: portfolio_path.display().to_string(),
+        portfolio_db_present: portfolio_path.is_file(),
+        last_backup_files: state.last_backup_files.clone(),
+        remote_backup_files,
     })
+}
+
+const REMOTE_INSPECT_MAX_BYTES: u64 = 200 * 1024 * 1024;
+
+async fn inspect_remote_backup_files(
+    drive: &DriveClient,
+    remote: &RemoteBackupInfo,
+) -> Vec<String> {
+    if remote.size > REMOTE_INSPECT_MAX_BYTES {
+        eprintln!(
+            "Drive backup is {} bytes — skipping remote manifest inspect",
+            remote.size
+        );
+        return Vec::new();
+    }
+    let temp = match tempfile::NamedTempFile::new() {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    if drive.download(&remote.file_id, temp.path()).await.is_err() {
+        return Vec::new();
+    }
+    read_manifest_from_zip(temp.path())
+        .ok()
+        .map(|m| m.files.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn oauth_configured() -> bool {
@@ -189,6 +230,7 @@ pub async fn push(force: bool) -> Result<SyncAction> {
 
     state.drive_file_id = Some(file_id);
     state.last_pushed_at = Some(manifest.exported_at);
+    state.last_backup_files = manifest.files.keys().cloned().collect();
     state.save()?;
 
     Ok(SyncAction::Pushed)
@@ -218,11 +260,29 @@ pub async fn pull(force: bool) -> Result<SyncAction> {
     let remote = resolve_remote(&drive, &state).await?;
     let temp_zip = tempfile::NamedTempFile::new()?;
     drive.download(&remote.file_id, temp_zip.path()).await?;
-    let manifest = restore_archive(temp_zip.path())?;
+
+    let manifest = read_manifest_from_zip(temp_zip.path())?;
+    let restored_portfolio = manifest.files.contains_key(crate::config::PORTFOLIO_DB_NAME);
+    if !restored_portfolio {
+        eprintln!(
+            "Drive pull: remote backup does not contain {} — portfolio data on Google Drive was not updated by the last push",
+            crate::config::PORTFOLIO_DB_NAME
+        );
+    }
+
+    if databases_replaceable() {
+        restore_archive(temp_zip.path())?;
+        if pending_restore_path().is_file() {
+            let _ = std::fs::remove_file(pending_restore_path());
+        }
+    } else {
+        std::fs::copy(temp_zip.path(), pending_restore_path())?;
+    }
 
     state.drive_file_id = Some(remote.file_id);
     state.last_pulled_at = Some(Utc::now());
-    state.last_pushed_at = Some(manifest.exported_at);
+    state.last_pushed_at = Some(max_db_mtime()?.unwrap_or(manifest.exported_at));
+    state.last_backup_files = manifest.files.keys().cloned().collect();
     state.save()?;
 
     Ok(SyncAction::Pulled)
@@ -252,10 +312,13 @@ async fn resolve_remote(drive: &DriveClient, state: &SyncState) -> Result<Remote
         .ok_or_else(|| Error::Other("no remote backup found on Google Drive".into()))
 }
 
-/// Startup preflight: pull from Drive when remote is newer. Ignores auth/conflict errors.
+/// Startup preflight: apply deferred restore, then pull from Drive when remote is newer.
 pub async fn startup_pull_if_newer() -> Result<Option<SyncAction>> {
     if !vault::startup_allowed() {
         return Ok(None);
+    }
+    if apply_pending_restore_if_any()?.is_some() {
+        return Ok(Some(SyncAction::Pulled));
     }
     if !is_authenticated() {
         return Ok(None);
@@ -276,6 +339,15 @@ mod tests {
         assert_eq!(
             decide(None, true, None),
             SyncRecommendation::FirstPush
+        );
+    }
+
+    #[test]
+    fn decide_pull_on_fresh_device_with_remote() {
+        let remote = Utc::now();
+        assert_eq!(
+            decide(None, true, Some(remote)),
+            SyncRecommendation::Pull
         );
     }
 

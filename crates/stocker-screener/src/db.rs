@@ -135,74 +135,7 @@ pub async fn validate_schema(pool: &SqlitePool) -> Result<()> {
 
 const DB_FILE_NAME: &str = "stocker.db";
 
-/// Default DB path.
-///
-/// Resolution order:
-/// 1. `STOCKER_DB_PATH` environment variable
-/// 2. Existing `stocker.db` in the current directory, beside the executable, or a parent (up to 6 levels)
-/// 3. `./stocker.db` in the current directory (created on first open if missing)
+/// Default DB path (`STOCKER_DB_PATH`, then `%APPDATA%/stocker/stocker.db`, then legacy search).
 pub fn default_db_path() -> PathBuf {
-    if let Ok(env_path) = std::env::var("STOCKER_DB_PATH") {
-        return PathBuf::from(env_path);
-    }
-    if let Some(found) = find_existing_db_path() {
-        return found;
-    }
-    PathBuf::from(DB_FILE_NAME)
-}
-
-/// Walk `start` and up to `max_up` parents looking for `stocker.db`.
-fn find_in_ancestors(start: &Path, max_up: usize) -> Option<PathBuf> {
-    let mut dir = start.to_path_buf();
-    for _ in 0..=max_up {
-        let candidate = dir.join(DB_FILE_NAME);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    None
-}
-
-fn find_existing_db_path() -> Option<PathBuf> {
-    if let Ok(cwd) = std::env::current_dir() {
-        let in_cwd = cwd.join(DB_FILE_NAME);
-        if in_cwd.is_file() {
-            return Some(in_cwd);
-        }
-        if let Some(found) = find_in_ancestors(&cwd, 6) {
-            return Some(found);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let beside_exe = exe_dir.join(DB_FILE_NAME);
-            if beside_exe.is_file() {
-                return Some(beside_exe);
-            }
-            if let Some(found) = find_in_ancestors(exe_dir, 6) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn find_in_ancestors_locates_parent_db() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        let nested = repo.join("target").join("release");
-        fs::create_dir_all(&nested).unwrap();
-        let db = repo.join(DB_FILE_NAME);
-        fs::write(&db, b"").unwrap();
-        assert_eq!(find_in_ancestors(&nested, 6), Some(db));
-    }
+    stocker_core::paths::resolve_data_file_path("STOCKER_DB_PATH", DB_FILE_NAME)
 }

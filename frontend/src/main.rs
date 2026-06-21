@@ -27,15 +27,16 @@ mod types;
 fn main() {
     #[cfg(feature = "desktop")]
     {
+        stocker_core::paths::pin_database_paths();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
         rt.block_on(async {
-            match stocker_sync::startup_pull_if_newer().await {
-                Ok(Some(action)) => eprintln!("Startup sync: {action:?}"),
+            match stocker_sync::apply_pending_restore_if_any() {
+                Ok(Some(_)) => eprintln!("Applied deferred Google Drive restore."),
                 Ok(None) => {}
-                Err(e) => eprintln!("Startup sync skipped: {e}"),
+                Err(e) => eprintln!("Deferred restore failed: {e}"),
             }
         });
     }

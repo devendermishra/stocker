@@ -13,6 +13,7 @@ pub mod fundamental_analysis;
 mod http_policy;
 pub mod math;
 pub mod models;
+pub mod paths;
 pub mod report;
 pub mod research_summary;
 pub mod sector;

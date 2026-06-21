@@ -108,6 +108,7 @@ enum SyncCommand {
 #[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    stocker_core::paths::pin_database_paths();
 
     match Cli::parse().command {
         Command::Report { symbol } => {

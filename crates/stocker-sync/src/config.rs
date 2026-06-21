@@ -9,19 +9,7 @@ pub const APP_PROPERTY_EXPORTED_AT: &str = "exported_at";
 
 /// Config directory for tokens and sync state (`~/.config/stocker` or platform equivalent).
 pub fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("STOCKER_CONFIG_DIR") {
-        return PathBuf::from(dir);
-    }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("stocker");
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".config").join("stocker");
-    }
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        return PathBuf::from(appdata).join("stocker");
-    }
-    PathBuf::from(".config/stocker")
+    stocker_core::paths::config_dir()
 }
 
 pub fn tokens_path() -> PathBuf {
@@ -34,6 +22,11 @@ pub fn oauth_config_path() -> PathBuf {
 
 pub fn sync_state_path() -> PathBuf {
     config_dir().join("sync_state.json")
+}
+
+/// Zip downloaded from Drive when databases were locked; applied on next app start.
+pub fn pending_restore_path() -> PathBuf {
+    config_dir().join("pending_restore.zip")
 }
 
 pub fn portfolio_db_path() -> PathBuf {

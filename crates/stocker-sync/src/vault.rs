@@ -380,7 +380,11 @@ pub fn clear_tokens() -> Result<()> {
 }
 
 pub fn startup_allowed() -> bool {
-    is_configured() && is_unlocked()
+    if is_configured() {
+        is_unlocked()
+    } else {
+        true
+    }
 }
 
 #[cfg(test)]

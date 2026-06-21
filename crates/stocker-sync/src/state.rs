@@ -14,6 +14,8 @@ pub struct SyncState {
     pub drive_file_id: Option<String>,
     pub last_pushed_at: Option<DateTime<Utc>>,
     pub last_pulled_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_backup_files: Vec<String>,
 }
 
 impl Default for SyncState {
@@ -23,6 +25,7 @@ impl Default for SyncState {
             drive_file_id: None,
             last_pushed_at: None,
             last_pulled_at: None,
+            last_backup_files: Vec::new(),
         }
     }
 }
