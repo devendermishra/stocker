@@ -46,7 +46,7 @@ async fn diagnose_portfolio_migration_2() {
 
     let sql = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/migrations/0002_related_symbol.sql"
+        "/migrations/0002_valuation_snapshot.sql"
     ))
     .unwrap();
     let manual = Sha384::digest(sql.as_bytes());
@@ -62,6 +62,29 @@ async fn diagnose_portfolio_migration_2() {
         eprintln!("  {name}");
     }
 
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn open_applies_pending_migrations() {
+    let path = stocker_portfolio::db::default_db_path();
+    let pool = stocker_portfolio::db::open(&path).await.unwrap();
+    let version: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(version >= 4, "expected migration 4 (related_symbol), got max version {version}");
+    let cols = sqlx::query("PRAGMA table_info(transactions)")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let has_related = cols.iter().any(|row| {
+        let name: String = row.get("name");
+        name == "related_symbol"
+    });
+    assert!(has_related, "transactions.related_symbol column missing");
     pool.close().await;
 }
 
