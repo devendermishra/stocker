@@ -145,6 +145,35 @@ pub async fn create_archive(device_id: Uuid, dest_zip: &Path) -> Result<SyncMani
     Ok(manifest)
 }
 
+/// Extract one file from a backup zip, verifying its manifest checksum.
+pub fn extract_file_from_zip(zip_path: &Path, name: &str, dest: &Path) -> Result<()> {
+    let manifest = read_manifest_from_zip(zip_path)?;
+    let entry = manifest
+        .files
+        .get(name)
+        .ok_or_else(|| Error::Other(format!("{name} not listed in backup manifest")))?;
+
+    let file = std::fs::File::open(zip_path)?;
+    let mut archive = ZipArchive::new(file)?;
+    let mut zipped = archive
+        .by_name(name)
+        .map_err(|_| Error::Other(format!("missing {name} in backup archive")))?;
+    let mut bytes = Vec::new();
+    zipped.read_to_end(&mut bytes)?;
+    let actual = sha256_hex(&bytes);
+    if actual != entry.sha256 {
+        return Err(Error::ChecksumMismatch(name.to_string()));
+    }
+
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(dest, bytes)?;
+    Ok(())
+}
+
 pub fn read_manifest_from_zip(zip_path: &Path) -> Result<SyncManifest> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = ZipArchive::new(file)?;
@@ -319,5 +348,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn extract_file_from_zip_verifies_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        let portfolio = dir.path().join("portfolio.db");
+        std::env::set_var("STOCKER_PORTFOLIO_DB_PATH", portfolio.to_str().unwrap());
+        std::env::set_var("STOCKER_DB_PATH", dir.path().join("stocker.db").to_str().unwrap());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(init_test_db(&portfolio));
+
+        let zip_path = dir.path().join("backup.zip");
+        let manifest = rt
+            .block_on(create_archive(Uuid::new_v4(), &zip_path))
+            .unwrap();
+
+        let dest = dir.path().join("extracted.db");
+        extract_file_from_zip(&zip_path, PORTFOLIO_DB_NAME, &dest).unwrap();
+        assert!(dest.is_file());
+
+        let count: i64 = rt.block_on(async {
+            sqlx::query_scalar("SELECT COUNT(*) FROM t")
+                .fetch_one(
+                    &SqlitePoolOptions::new()
+                        .max_connections(1)
+                        .connect_with(
+                            SqliteConnectOptions::from_str(&format!("sqlite://{}", dest.display()))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        assert_eq!(count, 1);
+        let _ = manifest;
     }
 }

@@ -15,12 +15,14 @@ mod stock_detail;
 mod styles;
 mod transactions;
 
-pub use dashboard::PortfolioDashboard;
+pub use dashboard::{AllocationTable, PortfolioDashboard, SummaryCard, return_pct_label};
 pub use holdings::PortfolioHoldings;
 pub use labels::PortfolioLabels;
 pub use import::TransactionImport;
+pub use layout::{AuthGuard, PortfolioLayout, PortfolioNav, PortfolioTab};
 pub use list::PortfolioList;
 pub use overview::PortfolioOverview;
 pub use schedules::PortfolioSchedules;
 pub use stock_detail::PortfolioStockDetail;
+pub use styles::FILTER_BAR;
 pub use transactions::PortfolioTransactions;

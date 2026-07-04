@@ -22,6 +22,8 @@ mod stocks;
 mod sync;
 mod sync_api;
 mod sync_oauth_modal;
+mod sync_portfolio;
+mod sync_portfolio_api;
 mod types;
 
 fn main() {

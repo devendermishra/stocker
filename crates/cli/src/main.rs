@@ -103,6 +103,8 @@ enum SyncCommand {
         #[arg(long)]
         force: bool,
     },
+    /// List portfolios in the Google Drive backup vs local (JSON)
+    Browse,
 }
 
 #[tokio::main]
@@ -382,7 +384,7 @@ async fn run_refresh(symbol: &str, db: Option<&Path>) -> Result<(), i32> {
 }
 
 async fn run_sync(command: SyncCommand) -> Result<(), i32> {
-    use stocker_sync::{SyncAction, auth, pull, push, status, sync};
+    use stocker_sync::{SyncAction, auth, load_local_portfolio_refs, pull, push, remote_browse_index, status, sync};
 
     let map_err = |e: stocker_sync::Error| {
         eprintln!("Sync error: {e}");
@@ -418,6 +420,12 @@ async fn run_sync(command: SyncCommand) -> Result<(), i32> {
                 SyncAction::Pushed => eprintln!("Pushed local backup to Google Drive."),
                 SyncAction::AlreadyInSync => eprintln!("Already in sync."),
             }
+            Ok(())
+        }
+        SyncCommand::Browse => {
+            let local = load_local_portfolio_refs().await.map_err(map_err)?;
+            let idx = remote_browse_index(false, local).await.map_err(map_err)?;
+            println!("{}", serde_json::to_string_pretty(&idx).unwrap());
             Ok(())
         }
     }

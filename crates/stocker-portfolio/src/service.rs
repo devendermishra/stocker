@@ -26,6 +26,7 @@ pub struct PortfolioService {
     pub(crate) pool: sqlx::SqlitePool,
     pub(crate) screener: Option<Arc<ScreenerService>>,
     pub(crate) mf: Option<Arc<MfService>>,
+    read_only: bool,
 }
 
 impl PortfolioService {
@@ -35,9 +36,29 @@ impl PortfolioService {
         mf: Option<Arc<MfService>>,
     ) -> Result<Self> {
         let pool = db::open(path).await?;
-        let svc = Self { pool, screener, mf };
+        let svc = Self {
+            pool,
+            screener,
+            mf,
+            read_only: false,
+        };
         svc.ensure_local_user().await?;
         Ok(svc)
+    }
+
+    /// Open an existing database read-only (no migrations, no local user bootstrap).
+    pub async fn open_readonly(path: &Path) -> Result<Self> {
+        let pool = db::open_existing_readonly(path).await?;
+        Ok(Self {
+            pool,
+            screener: None,
+            mf: None,
+            read_only: true,
+        })
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Returns the implicit local user (no login required).
@@ -296,13 +317,23 @@ impl PortfolioService {
         portfolio_id: i64,
     ) -> Result<crate::sip_refresh::SipRefreshResult> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
-        crate::sip_refresh::refresh_sip_transactions(
+        let schedule = crate::mf_schedule::refresh_active_schedules(
+            &self.pool,
+            self.mf.clone(),
+            user_id,
+            portfolio_id,
+            Some(crate::models::ScheduleType::Sip),
+        )
+        .await?;
+        let mut result = crate::sip_refresh::refresh_sip_transactions(
             &self.pool,
             self.mf.clone(),
             user_id,
             portfolio_id,
         )
-        .await
+        .await?;
+        merge_schedule_refresh_into_sip_result(&mut result, schedule);
+        Ok(result)
     }
 
     pub async fn refresh_swp_transactions(
@@ -311,13 +342,23 @@ impl PortfolioService {
         portfolio_id: i64,
     ) -> Result<crate::swp_refresh::SwpRefreshResult> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
-        crate::swp_refresh::refresh_swp_transactions(
+        let schedule = crate::mf_schedule::refresh_active_schedules(
+            &self.pool,
+            self.mf.clone(),
+            user_id,
+            portfolio_id,
+            Some(crate::models::ScheduleType::Swp),
+        )
+        .await?;
+        let mut result = crate::swp_refresh::refresh_swp_transactions(
             &self.pool,
             self.mf.clone(),
             user_id,
             portfolio_id,
         )
-        .await
+        .await?;
+        merge_schedule_refresh_into_swp_result(&mut result, schedule);
+        Ok(result)
     }
 
     pub async fn register_mf_schedule(
@@ -557,7 +598,9 @@ impl PortfolioService {
     ) -> Result<Vec<crate::models::FifoLot>> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
         let symbol = self.resolve_symbol(symbol).await?;
-        ensure_ledger(&self.pool, portfolio_id, false).await?;
+        if !self.read_only {
+            ensure_ledger(&self.pool, portfolio_id, false).await?;
+        }
 
         let rows = sqlx::query(
             "SELECT id, portfolio_id, symbol, source_transaction_id, acquired_date,
@@ -592,7 +635,9 @@ impl PortfolioService {
         portfolio_id: i64,
     ) -> Result<Vec<crate::models::RealizedMatch>> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
-        ensure_ledger(&self.pool, portfolio_id, false).await?;
+        if !self.read_only {
+            ensure_ledger(&self.pool, portfolio_id, false).await?;
+        }
 
         let rows = sqlx::query(
             "SELECT id, portfolio_id, sell_transaction_id, buy_transaction_id, symbol, quantity,
@@ -622,5 +667,45 @@ impl PortfolioService {
                 })
             })
             .collect()
+    }
+}
+
+fn merge_schedule_refresh_into_sip_result(
+    result: &mut crate::sip_refresh::SipRefreshResult,
+    schedule: crate::models::RegisterMfScheduleResult,
+) {
+    result.registered = schedule.registered;
+    for buy_id in schedule.materialized {
+        if !result.created.contains(&buy_id) {
+            result.created.push(buy_id);
+        }
+    }
+    for failure in schedule.failed {
+        result.failed.push(crate::sip_refresh::SipRefreshFailure {
+            sip_id: 0,
+            symbol: None,
+            trade_date: failure.trade_date,
+            reason: failure.reason,
+        });
+    }
+}
+
+fn merge_schedule_refresh_into_swp_result(
+    result: &mut crate::swp_refresh::SwpRefreshResult,
+    schedule: crate::models::RegisterMfScheduleResult,
+) {
+    result.registered = schedule.registered;
+    for sell_id in schedule.materialized {
+        if !result.created.contains(&sell_id) {
+            result.created.push(sell_id);
+        }
+    }
+    for failure in schedule.failed {
+        result.failed.push(crate::swp_refresh::SwpRefreshFailure {
+            swp_id: 0,
+            symbol: None,
+            trade_date: failure.trade_date,
+            reason: failure.reason,
+        });
     }
 }

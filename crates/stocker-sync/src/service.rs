@@ -7,6 +7,7 @@ use crate::config::{pending_restore_path, portfolio_db_path, OAuthConfig};
 use crate::drive::{DriveClient, RemoteBackupInfo};
 use crate::error::{Error, Result};
 use crate::oauth::{authenticate, clear_authentication, is_authenticated};
+use crate::remote::invalidate_remote_cache;
 use crate::state::SyncState;
 use crate::vault::{self, vault_status};
 
@@ -199,7 +200,7 @@ pub fn logout() -> Result<()> {
     clear_authentication()
 }
 
-fn ensure_vault_ready() -> Result<()> {
+pub(crate) fn ensure_vault_ready() -> Result<()> {
     if vault::is_configured() && !vault::is_unlocked() {
         return Err(Error::VaultLocked);
     }
@@ -232,6 +233,7 @@ pub async fn push(force: bool) -> Result<SyncAction> {
     state.last_pushed_at = Some(manifest.exported_at);
     state.last_backup_files = manifest.files.keys().cloned().collect();
     state.save()?;
+    invalidate_remote_cache();
 
     Ok(SyncAction::Pushed)
 }
@@ -284,6 +286,7 @@ pub async fn pull(force: bool) -> Result<SyncAction> {
     state.last_pushed_at = Some(max_db_mtime()?.unwrap_or(manifest.exported_at));
     state.last_backup_files = manifest.files.keys().cloned().collect();
     state.save()?;
+    invalidate_remote_cache();
 
     Ok(SyncAction::Pulled)
 }
@@ -300,7 +303,7 @@ pub async fn sync(force: bool) -> Result<SyncAction> {
     }
 }
 
-async fn resolve_remote(drive: &DriveClient, state: &SyncState) -> Result<RemoteBackupInfo> {
+pub(crate) async fn resolve_remote(drive: &DriveClient, state: &SyncState) -> Result<RemoteBackupInfo> {
     if let Some(id) = state.drive_file_id.as_deref() {
         if let Ok(info) = drive.remote_info(id).await {
             return Ok(info);

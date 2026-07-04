@@ -14,15 +14,45 @@ mod desktop {
         status().await.map_err(|e| e.to_string())
     }
 
+    pub fn format_recommendation(rec: stocker_sync::SyncRecommendation) -> String {
+        use stocker_sync::SyncRecommendation;
+        match rec {
+            SyncRecommendation::Pull => {
+                "Pull from Google Drive — newer backup available on Drive.".into()
+            }
+            SyncRecommendation::Push => {
+                "Push to Google Drive — this device has changes not yet uploaded.".into()
+            }
+            SyncRecommendation::FirstPush => {
+                "Push to Google Drive — no backup on Drive yet (or sign in and refresh).".into()
+            }
+            SyncRecommendation::Conflict => {
+                "Conflict — both Drive and this device changed. Choose Force push or Force pull.".into()
+            }
+            SyncRecommendation::AlreadyInSync => "Already in sync.".into(),
+        }
+    }
+
+    pub async fn sync_remote_browse_index(
+        force_refresh: bool,
+    ) -> Result<stocker_sync::RemoteBrowseIndex, String> {
+        let local = crate::portfolio_api::local_portfolio_refs_for_sync().await?;
+        stocker_sync::remote_browse_index(force_refresh, local)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn sync_auth() -> Result<(), String> {
         auth().await.map_err(|e| e.to_string())
     }
 
     pub async fn sync_run(force: bool) -> Result<String, String> {
-        sync(force)
-            .await
-            .map(|a| format!("{a:?}"))
-            .map_err(|e| e.to_string())
+        let action = sync(force).await.map_err(|e| e.to_string())?;
+        let formatted = format!("{action:?}");
+        if action_needs_restart(&formatted) {
+            crate::portfolio_api::invalidate_portfolio_service();
+        }
+        Ok(formatted)
     }
 
     pub async fn sync_push(force: bool) -> Result<String, String> {
@@ -33,10 +63,12 @@ mod desktop {
     }
 
     pub async fn sync_pull(force: bool) -> Result<String, String> {
-        pull(force)
-            .await
-            .map(|a| format!("{a:?}"))
-            .map_err(|e| e.to_string())
+        let action = pull(force).await.map_err(|e| e.to_string())?;
+        let formatted = format!("{action:?}");
+        if action_needs_restart(&formatted) {
+            crate::portfolio_api::invalidate_portfolio_service();
+        }
+        Ok(formatted)
     }
 
     pub async fn sync_startup_pull() -> Result<Option<String>, String> {
@@ -180,6 +212,9 @@ mod stub {
     }
 
     pub fn schedule_restart_after_pull() {}
+    pub fn format_recommendation(_rec: ()) -> String {
+        String::new()
+    }
 }
 
 #[cfg(not(feature = "desktop"))]

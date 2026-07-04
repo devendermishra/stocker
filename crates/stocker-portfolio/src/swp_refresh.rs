@@ -22,6 +22,9 @@ pub struct SwpRefreshFailure {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SwpRefreshResult {
+    /// SWP transaction rows registered from active schedules before materialization.
+    #[serde(default)]
+    pub registered: Vec<i64>,
     pub created: Vec<i64>,
     pub skipped: Vec<i64>,
     pub failed: Vec<SwpRefreshFailure>,
@@ -51,6 +54,7 @@ pub async fn refresh_swp_transactions(
     let materialized = load_materialized_swp_ids(pool, user_id, portfolio_id).await?;
 
     let mut result = SwpRefreshResult {
+        registered: Vec::new(),
         created: Vec::new(),
         skipped: Vec::new(),
         failed: Vec::new(),

@@ -23,6 +23,9 @@ pub struct SipRefreshFailure {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SipRefreshResult {
+    /// SIP transaction rows registered from active schedules before materialization.
+    #[serde(default)]
+    pub registered: Vec<i64>,
     pub created: Vec<i64>,
     pub skipped: Vec<i64>,
     pub failed: Vec<SipRefreshFailure>,
@@ -52,6 +55,7 @@ pub async fn refresh_sip_transactions(
     let materialized = load_materialized_sip_ids(pool, user_id, portfolio_id).await?;
 
     let mut result = SipRefreshResult {
+        registered: Vec::new(),
         created: Vec::new(),
         skipped: Vec::new(),
         failed: Vec::new(),

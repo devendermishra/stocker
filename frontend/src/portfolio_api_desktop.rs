@@ -1,12 +1,11 @@
 //! In-process portfolio backend for the desktop standalone app.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use stocker_mf::{db::default_db_path as mf_db_path, MfService};
 use stocker_portfolio::{db::default_db_path, LabelEntityType, PortfolioService, PortfolioViewOptions};
-use tokio::sync::OnceCell;
 
 use super::{
     AllocationRow, Dashboard, FifoLot, Holding, ImportApplyRequest, ImportField, ImportResult,
@@ -16,26 +15,40 @@ use super::{
     SipRefreshResult, SwpRefreshResult, Transaction, TransactionFilter, UpdatePortfolio,
 };
 
-static SERVICE: OnceCell<Arc<PortfolioService>> = OnceCell::const_new();
+static SERVICE: Mutex<Option<Arc<PortfolioService>>> = Mutex::new(None);
+
+async fn open_service() -> Result<PortfolioService, String> {
+    let screener = crate::screener_api::shared_screener().await.ok();
+    let mf = {
+        let path = mf_db_path();
+        eprintln!("Opening mutual fund DB at {}", path.display());
+        MfService::open(&path).await.ok().map(Arc::new)
+    };
+    let path = default_db_path();
+    eprintln!("Opening portfolio DB at {}", path.display());
+    PortfolioService::open(&path, screener, mf)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 async fn service() -> Result<Arc<PortfolioService>, String> {
-    SERVICE
-        .get_or_try_init(|| async {
-            let screener = crate::screener_api::shared_screener().await.ok();
-            let mf = {
-                let path = mf_db_path();
-                eprintln!("Opening mutual fund DB at {}", path.display());
-                MfService::open(&path).await.ok().map(Arc::new)
-            };
-            let path = default_db_path();
-            eprintln!("Opening portfolio DB at {}", path.display());
-            let svc = PortfolioService::open(&path, screener, mf)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(Arc::new(svc))
-        })
-        .await
-        .cloned()
+    if let Some(svc) = SERVICE.lock().unwrap().clone() {
+        return Ok(svc);
+    }
+    let svc = Arc::new(open_service().await?);
+    *SERVICE.lock().unwrap() = Some(svc.clone());
+    Ok(svc)
+}
+
+/// Drop cached DB pools so the next call reopens files from disk (e.g. after sync pull).
+pub fn invalidate_portfolio_service() {
+    *SERVICE.lock().unwrap() = None;
+}
+
+pub async fn local_portfolio_refs_for_sync(
+) -> Result<Vec<stocker_sync::LocalPortfolioRef>, String> {
+    let portfolios: Vec<Portfolio> = list_portfolios(false).await?;
+    convert(portfolios)
 }
 
 async fn user_id(svc: &PortfolioService) -> Result<i64, String> {
@@ -264,7 +277,7 @@ pub async fn refresh_sip_transactions(portfolio_id: i64) -> Result<SipRefreshRes
             .await
             .map_err(map_err)?,
     )?;
-    if !result.created.is_empty() {
+    if !result.created.is_empty() || !result.registered.is_empty() {
         crate::portfolio_data_revision::bump_portfolio_data_revision();
     }
     Ok(result)
@@ -310,7 +323,7 @@ pub async fn refresh_swp_transactions(portfolio_id: i64) -> Result<SwpRefreshRes
             .await
             .map_err(map_err)?,
     )?;
-    if !result.created.is_empty() {
+    if !result.created.is_empty() || !result.registered.is_empty() {
         crate::portfolio_data_revision::bump_portfolio_data_revision();
     }
     Ok(result)
