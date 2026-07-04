@@ -117,7 +117,7 @@ pub fn SummaryCard(label: String, value: String) -> Element {
 }
 
 #[component]
-fn AllocationTable(data: Option<Result<Vec<crate::portfolio_api::AllocationRow>, String>>) -> Element {
+pub fn AllocationTable(data: Option<Result<Vec<crate::portfolio_api::AllocationRow>, String>>) -> Element {
     match data {
         None => rsx! { p { "Loading…" } },
         Some(Err(e)) => rsx! { p { style: "color: #b00020;", {e.clone()} } },

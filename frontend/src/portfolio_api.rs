@@ -271,6 +271,8 @@ pub struct SwpRefreshFailure {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwpRefreshResult {
+    #[serde(default)]
+    pub registered: Vec<i64>,
     pub created: Vec<i64>,
     pub skipped: Vec<i64>,
     pub failed: Vec<SwpRefreshFailure>,
@@ -569,6 +571,8 @@ pub struct SipRefreshFailure {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SipRefreshResult {
+    #[serde(default)]
+    pub registered: Vec<i64>,
     pub created: Vec<i64>,
     pub skipped: Vec<i64>,
     pub failed: Vec<SipRefreshFailure>,
@@ -878,7 +882,7 @@ pub async fn refresh_sip_transactions(portfolio_id: i64) -> Result<SipRefreshRes
     let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/sip/refresh");
     let text = api_request("POST", &path, None::<&()>).await?;
     let result: SipRefreshResult = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    if !result.created.is_empty() {
+    if !result.created.is_empty() || !result.registered.is_empty() {
         crate::portfolio_data_revision::bump_portfolio_data_revision();
     }
     Ok(result)
@@ -919,7 +923,7 @@ pub async fn refresh_swp_transactions(portfolio_id: i64) -> Result<SwpRefreshRes
     let path = format!("/api/v1/portfolio/portfolios/{portfolio_id}/swp/refresh");
     let text = api_request("POST", &path, None::<&()>).await?;
     let result: SwpRefreshResult = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    if !result.created.is_empty() {
+    if !result.created.is_empty() || !result.registered.is_empty() {
         crate::portfolio_data_revision::bump_portfolio_data_revision();
     }
     Ok(result)

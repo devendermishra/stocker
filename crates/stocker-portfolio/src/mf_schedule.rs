@@ -610,6 +610,7 @@ pub async fn refresh_active_schedules(
     mf: Option<Arc<MfService>>,
     user_id: i64,
     portfolio_id: i64,
+    schedule_type: Option<ScheduleType>,
 ) -> Result<RegisterMfScheduleResult> {
     let schedules = get_active_schedules(pool, portfolio_id).await?;
     let mut all_registered = Vec::new();
@@ -620,6 +621,9 @@ pub async fn refresh_active_schedules(
     let mut last_status = ScheduleStatus::Active;
 
     for schedule in schedules {
+        if schedule_type.is_some_and(|t| schedule.schedule_type != t) {
+            continue;
+        }
         last_schedule_id = schedule.id;
         let suggestions = suggest_missing_for_schedule(pool, &schedule).await?;
         if suggestions.is_empty() {

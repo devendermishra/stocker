@@ -27,6 +27,7 @@ struct DriveFileList {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DriveFile {
     id: String,
     #[serde(default)]
@@ -283,4 +284,24 @@ fn parse_drive_time(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_remote_file_reads_camel_case_drive_json() {
+        let json = r#"{
+            "id": "abc123",
+            "modifiedTime": "2026-07-04T09:16:19.394Z",
+            "size": "12345",
+            "appProperties": { "exported_at": "2026-07-04T09:16:19.311Z" }
+        }"#;
+        let file: DriveFile = serde_json::from_str(json).unwrap();
+        let info = parse_remote_file(file).unwrap();
+        assert_eq!(info.file_id, "abc123");
+        assert_eq!(info.size, 12345);
+        assert!(info.exported_at.is_some());
+    }
 }

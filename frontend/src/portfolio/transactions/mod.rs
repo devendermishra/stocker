@@ -234,12 +234,13 @@ fn TransactionToolbar(
                         match refresh_sip_transactions(id).await {
                             Ok(result) => {
                                 sip_refresh_msg.set(Some(format!(
-                                    "SIP refresh: {} buy(s) created, {} skipped, {} failed",
+                                    "SIP refresh: {} installment(s) registered, {} buy(s) created, {} skipped, {} failed",
+                                    result.registered.len(),
                                     result.created.len(),
                                     result.skipped.len(),
                                     result.failed.len()
                                 )));
-                                if !result.created.is_empty() {
+                                if !result.created.is_empty() || !result.registered.is_empty() {
                                     reload.set(reload() + 1);
                                 }
                                 if !result.failed.is_empty() {
@@ -274,12 +275,13 @@ fn TransactionToolbar(
                         match refresh_swp_transactions(id).await {
                             Ok(result) => {
                                 sip_refresh_msg.set(Some(format!(
-                                    "SWP refresh: {} sell(s) created, {} skipped, {} failed",
+                                    "SWP refresh: {} installment(s) registered, {} sell(s) created, {} skipped, {} failed",
+                                    result.registered.len(),
                                     result.created.len(),
                                     result.skipped.len(),
                                     result.failed.len()
                                 )));
-                                if !result.created.is_empty() {
+                                if !result.created.is_empty() || !result.registered.is_empty() {
                                     reload.set(reload() + 1);
                                 }
                                 if !result.failed.is_empty() {

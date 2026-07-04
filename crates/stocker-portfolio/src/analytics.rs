@@ -47,8 +47,16 @@ impl PortfolioService {
         opts: PortfolioViewOptions,
     ) -> Result<PortfolioView> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
-        let ledger =
-            ensure_ledger(&self.pool, portfolio_id, opts.force_rebuild).await?;
+        let ledger = if self.is_read_only() {
+            if opts.force_rebuild {
+                return Err(crate::error::Error::Other(
+                    "cannot rebuild a read-only portfolio database".into(),
+                ));
+            }
+            snapshot::load_ledger_stats(&self.pool, portfolio_id).await?
+        } else {
+            ensure_ledger(&self.pool, portfolio_id, opts.force_rebuild).await?
+        };
 
         let active_symbols: Vec<String> = ledger
             .symbols
@@ -110,21 +118,23 @@ impl PortfolioService {
 
         let summary = build_summary(portfolio_id, &holdings, &ledger, &txns);
 
-        let priced_at = symbol_prices
-            .values()
-            .map(|p| p.priced_at)
-            .max()
-            .unwrap_or_else(|| Utc::now().timestamp());
-        save_valuation(
-            &self.pool,
-            portfolio_id,
-            ledger.rebuilt_at,
-            &holdings,
-            &summary,
-            &symbol_prices,
-            priced_at,
-        )
-        .await?;
+        if !self.is_read_only() {
+            let priced_at = symbol_prices
+                .values()
+                .map(|p| p.priced_at)
+                .max()
+                .unwrap_or_else(|| Utc::now().timestamp());
+            save_valuation(
+                &self.pool,
+                portfolio_id,
+                ledger.rebuilt_at,
+                &holdings,
+                &summary,
+                &symbol_prices,
+                priced_at,
+            )
+            .await?;
+        }
 
         Ok(PortfolioView {
             ledger,

@@ -22,9 +22,8 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         }
     }
 
-    let url = format!("sqlite://{}", path.display());
-    let opts = SqliteConnectOptions::from_str(&url)
-        .map_err(|e| Error::Other(format!("invalid sqlite url: {e}")))?
+    let opts = SqliteConnectOptions::new()
+        .filename(path)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
@@ -38,6 +37,29 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
 
     MIGRATOR.run(&pool).await?;
     Ok(pool)
+}
+
+/// Open an existing portfolio database read-only without running migrations.
+pub async fn open_existing_readonly(path: &Path) -> Result<SqlitePool> {
+    if !path.is_file() {
+        return Err(Error::Other(format!(
+            "portfolio database not found at {}",
+            path.display()
+        )));
+    }
+
+    let opts = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .read_only(true)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(30));
+
+    SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(opts)
+        .await
+        .map_err(Error::from)
 }
 
 /// Open an in-memory DB for tests.

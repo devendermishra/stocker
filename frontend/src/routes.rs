@@ -9,6 +9,10 @@ use crate::report::Report;
 use crate::screener::Screener;
 use crate::stocks::Stocks;
 use crate::sync::DriveSync;
+use crate::sync_portfolio::{
+    SyncPortfolioDashboard, SyncPortfolioHoldings, SyncPortfolioOverview, SyncPortfolioStockDetail,
+    SyncPortfolioTransactions,
+};
 
 #[derive(Clone, Routable, Debug, PartialEq)]
 pub enum Route {
@@ -22,6 +26,16 @@ pub enum Route {
     Stocks {},
     #[route("/sync")]
     DriveSync {},
+    #[route("/sync/portfolio/:id")]
+    SyncPortfolioOverview { id: i64 },
+    #[route("/sync/portfolio/:id/holdings")]
+    SyncPortfolioHoldings { id: i64 },
+    #[route("/sync/portfolio/:id/transactions")]
+    SyncPortfolioTransactions { id: i64 },
+    #[route("/sync/portfolio/:id/dashboard")]
+    SyncPortfolioDashboard { id: i64 },
+    #[route("/sync/portfolio/:id/stock/:symbol")]
+    SyncPortfolioStockDetail { id: i64, symbol: String },
     #[route("/portfolio")]
     PortfolioList {},
     #[route("/portfolio/labels")]
