@@ -126,7 +126,9 @@ pub fn save_scheme_list_cache(path: &Path, entries: &[SchemeListEntry]) -> Resul
 }
 
 pub fn normalize_mf_name_key(name: &str) -> String {
-    name.trim()
+    let stripped = strip_yahoo_exchange_suffix(name);
+    stripped
+        .trim()
         .to_lowercase()
         .replace(" ltd.", " limited")
         .replace(" ltd", " limited")
@@ -134,6 +136,18 @@ pub fn normalize_mf_name_key(name: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Strip a trailing Yahoo `.NS` / `.BO` suffix (often wrongly appended to fund names).
+pub fn strip_yahoo_exchange_suffix(s: &str) -> &str {
+    let t = s.trim();
+    if t.len() > 3 {
+        let suffix = &t[t.len() - 3..];
+        if suffix.eq_ignore_ascii_case(".NS") || suffix.eq_ignore_ascii_case(".BO") {
+            return t[..t.len() - 3].trim_end();
+        }
+    }
+    t
 }
 
 fn normalize_isin(raw: Option<&str>) -> Option<String> {
@@ -174,6 +188,19 @@ mod tests {
         assert_eq!(
             idx.lookup_symbol("141957"),
             Some(141957)
+        );
+    }
+
+    #[test]
+    fn lookup_ignores_spurious_yahoo_suffix() {
+        let idx = SchemeIndex::from_entries(sample_entries());
+        assert_eq!(
+            idx.lookup_name("Parag Parikh Flexi Cap Fund - Direct Plan - Growth.BO"),
+            Some(122639)
+        );
+        assert_eq!(
+            idx.lookup_symbol("Parag Parikh Flexi Cap Fund - Direct Plan - Growth.BO"),
+            Some(122639)
         );
     }
 

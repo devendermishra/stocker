@@ -61,6 +61,23 @@ impl PortfolioService {
         self.read_only
     }
 
+    /// Test helper: in-memory portfolio DB with optional screener / MF services.
+    #[cfg(test)]
+    pub(crate) async fn open_memory_for_test(
+        screener: Option<Arc<ScreenerService>>,
+        mf: Option<Arc<MfService>>,
+    ) -> Result<Self> {
+        let pool = db::open_memory().await?;
+        let svc = Self {
+            pool,
+            screener,
+            mf,
+            read_only: false,
+        };
+        svc.ensure_local_user().await?;
+        Ok(svc)
+    }
+
     /// Returns the implicit local user (no login required).
     pub async fn local_user(&self) -> Result<crate::models::User> {
         ensure_local_user(&self.pool).await

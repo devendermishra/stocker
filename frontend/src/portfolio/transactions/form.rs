@@ -365,7 +365,7 @@ fn save_transaction(
 ) {
     let sym = if asset_kind == AssetKind::MutualFund {
         selected_mf
-            .map(|h| h.scheme_name)
+            .map(|h| format!("MF:{}", h.scheme_code))
             .unwrap_or_else(|| mf_query)
     } else {
         symbol

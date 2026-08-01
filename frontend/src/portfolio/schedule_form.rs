@@ -212,7 +212,7 @@ pub fn MfScheduleForm(
                         };
                         let input = RegisterMfSchedule {
                             schedule_type: schedule_type(),
-                            symbol: mf.scheme_name,
+                            symbol: format!("MF:{}", mf.scheme_code),
                             amount: amt,
                             start_date: Some(start_date()),
                             end_date: end_d,
