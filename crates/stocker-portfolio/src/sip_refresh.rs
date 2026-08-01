@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::{TimeZone, Utc};
 use sqlx::SqlitePool;
 use stocker_core::fetcher::fetch_chart_history;
-use stocker_mf::{parse_mf_symbol, MfService};
+use stocker_mf::{allot_mf_purchase, mf_symbol, parse_mf_symbol, MfService};
 
 use crate::engine::rebuild;
 use crate::error::{Error, Result};
@@ -123,44 +123,90 @@ pub async fn materialize_sip(
         .filter(|a| *a > 0.0)
         .ok_or_else(|| Error::InvalidInput("sip missing amount".into()))?;
 
-    let (trade_date, price, quantity) = if let (Some(qty), Some(px)) = (
-        sip.quantity.filter(|q| *q > 0.0),
-        sip.price.filter(|p| *p > 0.0),
-    ) {
-        (sip.trade_date.clone(), px, qty)
-    } else if let Some(scheme_code) = parse_mf_symbol(symbol) {
-        let mf = mf.ok_or_else(|| Error::Other("mutual fund service unavailable".into()))?;
-        let nav = mf.nav_on_or_after(scheme_code, &sip.trade_date).await.map_err(|e| {
-            Error::Other(e.to_string())
-        })?;
-        let qty = amount / nav.nav;
-        (nav.nav_date, nav.nav, qty)
+    // Prefer MF NAV path: accept MF:{code}, fund name, or name wrongly suffixed with .BO/.NS.
+    let mf_scheme = if let Some(code) = parse_mf_symbol(symbol) {
+        Some(code)
+    } else if looks_like_equity_sip_symbol(symbol) {
+        None
+    } else if let Some(svc) = mf {
+        Some(svc.resolve_scheme_code(symbol).await.map_err(|e| {
+            Error::Other(format!("could not resolve mutual fund '{symbol}': {e}"))
+        })?)
     } else {
-        let (date, px) = stock_price_on_or_after(symbol, &sip.trade_date).await?;
-        let qty = amount / px;
-        (date, px, qty)
+        None
     };
+
+    let (trade_date, price, quantity, taxes, notes, buy_symbol) =
+        if let (Some(qty), Some(px)) = (
+            sip.quantity.filter(|q| *q > 0.0),
+            sip.price.filter(|p| *p > 0.0),
+        ) {
+            (
+                sip.trade_date.clone(),
+                px,
+                qty,
+                sip.taxes.filter(|t| *t > 0.0),
+                format!("Materialized from SIP #{}", sip.id),
+                symbol.to_string(),
+            )
+        } else if let Some(scheme_code) = mf_scheme {
+            let mf = mf.ok_or_else(|| Error::Other("mutual fund service unavailable".into()))?;
+            let nav = mf
+                .nav_on_or_after(scheme_code, &sip.trade_date)
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
+            let allot = allot_mf_purchase(amount, nav.nav).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "cannot allot MF purchase for amount {amount} at NAV {}",
+                    nav.nav
+                ))
+            })?;
+            let resolved = mf_symbol(scheme_code);
+            canonicalize_mf_symbol(pool, sip, &resolved).await?;
+            (
+                nav.nav_date,
+                allot.adjusted_nav,
+                allot.quantity,
+                Some(allot.stamp_duty),
+                format!(
+                    "Materialized from SIP #{} (NAV {:.4}, stamp duty {:.2})",
+                    sip.id, allot.published_nav, allot.stamp_duty
+                ),
+                resolved,
+            )
+        } else {
+            let (date, px) = stock_price_on_or_after(symbol, &sip.trade_date).await?;
+            let qty = amount / px;
+            (
+                date,
+                px,
+                qty,
+                None,
+                format!("Materialized from SIP #{}", sip.id),
+                symbol.to_string(),
+            )
+        };
 
     if price <= 0.0 {
         return Err(Error::InvalidInput(format!(
-            "invalid price {price} for {symbol}"
+            "invalid price {price} for {buy_symbol}"
         )));
     }
 
     let corp_key = sip_buy_key(sip.id);
-    let notes = format!("Materialized from SIP #{}", sip.id);
     let now = Utc::now().timestamp();
 
     let input = NewTransaction {
         portfolio_id: sip.portfolio_id,
         txn_type: TransactionType::Buy,
         trade_date,
-        symbol: Some(symbol.to_string()),
+        symbol: Some(buy_symbol),
         quantity: Some(quantity),
         price: Some(price),
+        // Cash out is the full SIP amount; stamp duty is recorded under taxes.
         gross_amount: Some(amount),
         brokerage: None,
-        taxes: None,
+        taxes,
         net_amount: Some(amount),
         split_ratio_num: None,
         split_ratio_den: None,
@@ -218,6 +264,44 @@ pub async fn materialize_sip(
     Ok(res.last_insert_rowid())
 }
 
+/// True when the symbol looks like an equity ticker (not a fund name).
+fn looks_like_equity_sip_symbol(symbol: &str) -> bool {
+    let trimmed = symbol.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    upper.ends_with(".NS")
+        || upper.ends_with(".BO")
+        || (trimmed.len() <= 20
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '&'))
+}
+
+/// Rewrite SIP / schedule rows that still store a fund name (or name.BO) to `MF:{code}`.
+async fn canonicalize_mf_symbol(pool: &SqlitePool, sip: &Transaction, resolved: &str) -> Result<()> {
+    if sip.symbol.as_deref() == Some(resolved) {
+        return Ok(());
+    }
+    let now = Utc::now().timestamp();
+    sqlx::query("UPDATE transactions SET symbol = ?, updated_at = ? WHERE id = ?")
+        .bind(resolved)
+        .bind(now)
+        .bind(sip.id)
+        .execute(pool)
+        .await?;
+    if let Some(schedule_id) = sip.schedule_id {
+        sqlx::query("UPDATE mf_schedules SET symbol = ?, updated_at = ? WHERE id = ?")
+            .bind(resolved)
+            .bind(now)
+            .bind(schedule_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 async fn stock_price_on_or_after(symbol: &str, sip_date: &str) -> Result<(String, f64)> {
     let chart = fetch_chart_history(symbol, "10y").await;
     let mut best: Option<(String, f64)> = None;
@@ -231,7 +315,8 @@ async fn stock_price_on_or_after(symbol: &str, sip_date: &str) -> Result<(String
         if date.is_empty() || date.as_str() < sip_date || bar.close <= 0.0 {
             continue;
         }
-        if best.as_ref().is_none_or(|(d, _)| date.as_str() > d.as_str()) {
+        // Earliest trading day on or after the SIP date.
+        if best.as_ref().is_none_or(|(d, _)| date.as_str() < d.as_str()) {
             best = Some((date, bar.close));
         }
     }
@@ -250,10 +335,32 @@ mod tests {
     use crate::models::NewTransaction;
     use crate::portfolios;
     use crate::transactions;
+    use stocker_mf::allot_mf_purchase;
 
     #[test]
     fn sip_buy_key_format() {
         assert_eq!(sip_buy_key(42), "sip_buy:42");
+    }
+
+    #[test]
+    fn mf_sip_allotment_subtracts_stamp_and_adjusts_nav() {
+        let allot = allot_mf_purchase(5_000.0, 100.0).unwrap();
+        assert!((allot.stamp_duty - 0.25).abs() < 1e-9);
+        assert!((allot.quantity - 49.9975).abs() < 1e-9);
+        assert!((allot.adjusted_nav - (5_000.0 / 49.9975)).abs() < 1e-9);
+        assert!(allot.adjusted_nav > 100.0);
+    }
+
+    #[test]
+    fn fund_name_with_bo_suffix_is_not_equity() {
+        assert!(!looks_like_equity_sip_symbol(
+            "PARAG PARIKH FLEXI CAP FUND - DIRECT PLAN - GROWTH.BO"
+        ));
+        assert!(!looks_like_equity_sip_symbol(
+            "SBI FLEXICAP FUND - DIRECT PLAN - GROWTH OPTION.BO"
+        ));
+        assert!(looks_like_equity_sip_symbol("RELIANCE.BO"));
+        assert!(looks_like_equity_sip_symbol("CDSL.NS"));
     }
 
     #[tokio::test]
@@ -316,10 +423,9 @@ mod tests {
         .await
         .unwrap();
 
-        let result =
-            refresh_sip_transactions(&pool, None, user.id, portfolio.id)
-                .await
-                .unwrap();
+        let result = refresh_sip_transactions(&pool, None, user.id, portfolio.id)
+            .await
+            .unwrap();
         assert!(result.created.is_empty());
         assert_eq!(result.skipped, vec![sip.id]);
     }

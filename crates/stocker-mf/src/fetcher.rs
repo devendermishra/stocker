@@ -165,13 +165,20 @@ pub fn parse_mfapi_date(raw: &str) -> Result<String> {
     Ok(format!("{year:04}-{month:02}-{day:02}"))
 }
 
-/// Pick the latest NAV point on or after `sip_date` (`YYYY-MM-DD`).
-pub fn latest_nav_on_or_after(points: &[NavPoint], sip_date: &str) -> Option<NavPoint> {
+/// Pick the earliest NAV point on or after `sip_date` (`YYYY-MM-DD`).
+///
+/// This is the next available published NAV / trading day after the SIP date.
+pub fn first_nav_on_or_after(points: &[NavPoint], sip_date: &str) -> Option<NavPoint> {
     points
         .iter()
         .filter(|p| p.nav_date.as_str() >= sip_date)
-        .max_by(|a, b| a.nav_date.cmp(&b.nav_date))
+        .min_by(|a, b| a.nav_date.cmp(&b.nav_date))
         .cloned()
+}
+
+/// Deprecated name retained for callers; same as [`first_nav_on_or_after`].
+pub fn latest_nav_on_or_after(points: &[NavPoint], sip_date: &str) -> Option<NavPoint> {
+    first_nav_on_or_after(points, sip_date)
 }
 
 fn urlencoding(s: &str) -> String {
@@ -272,9 +279,13 @@ mod tests {
                 nav: row.nav.parse().unwrap(),
             })
             .collect();
-        let best = latest_nav_on_or_after(&points, "2026-06-08").unwrap();
-        assert_eq!(best.nav_date, "2026-06-12");
-        assert!((best.nav - 118.41660).abs() < 1e-6);
+        let best = first_nav_on_or_after(&points, "2026-06-08").unwrap();
+        assert_eq!(best.nav_date, "2026-06-08");
+        assert!((best.nav - 117.26510).abs() < 1e-6);
+
+        let after_weekend = first_nav_on_or_after(&points, "2026-06-09").unwrap();
+        assert_eq!(after_weekend.nav_date, "2026-06-12");
+        assert!((after_weekend.nav - 118.41660).abs() < 1e-6);
 
         points.retain(|p| p.nav_date.as_str() >= "2026-06-08");
         assert_eq!(points.len(), 2);

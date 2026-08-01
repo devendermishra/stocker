@@ -8,11 +8,11 @@ use sqlx::{Row, SqlitePool};
 
 use crate::db;
 use crate::error::{Error, Result};
-use crate::fetcher::{latest_nav_on_or_after, MfFetcher};
+use crate::fetcher::{first_nav_on_or_after, MfFetcher};
 use crate::models::{mf_symbol, MfSearchHit, NavPoint, NavSnapshot};
 use crate::scheme_index::{
     default_scheme_list_cache_path, load_scheme_index_from_file, save_scheme_list_cache,
-    SchemeIndex, SchemeListEntry,
+    strip_yahoo_exchange_suffix, SchemeIndex, SchemeListEntry,
 };
 use crate::trading_day::should_refresh_nav;
 
@@ -87,18 +87,33 @@ impl MfService {
         self.fetcher.search(query).await
     }
 
-    /// Resolve a user-provided fund name to a scheme code.
+    /// Resolve a user-provided fund name (or `MF:{code}`) to a scheme code.
     ///
     /// Prefers an exact case-insensitive name match. If multiple results and no
     /// exact match, returns an error asking the user to pick from search results.
+    ///
+    /// Spurious Yahoo `.NS` / `.BO` suffixes on fund names are stripped first.
     pub async fn resolve_by_name(&self, name: &str) -> Result<i64> {
-        let trimmed = name.trim();
+        let trimmed = strip_yahoo_exchange_suffix(name.trim());
         if trimmed.is_empty() {
             return Err(Error::InvalidInput("fund name is required".into()));
         }
 
         // Already resolved symbol?
         if let Some(code) = crate::models::parse_mf_symbol(trimmed) {
+            self.ensure_scheme(code).await?;
+            return Ok(code);
+        }
+
+        // Local scheme-list cache (handles offline / name.BO imports).
+        let cached = self
+            .ensure_scheme_index_cache()
+            .await
+            .unwrap_or_else(|_| self.scheme_index_from_cache());
+        if let Some(code) = cached
+            .lookup_name(trimmed)
+            .or_else(|| cached.lookup_symbol(trimmed))
+        {
             self.ensure_scheme(code).await?;
             return Ok(code);
         }
@@ -130,6 +145,11 @@ impl MfService {
         Ok(chosen.scheme_code)
     }
 
+    /// Resolve portfolio symbol or fund name to scheme code (`MF:{code}`, name, or name.BO).
+    pub async fn resolve_scheme_code(&self, symbol_or_name: &str) -> Result<i64> {
+        self.resolve_by_name(symbol_or_name).await
+    }
+
     /// Ensure scheme metadata exists in DB (fetch from mfapi if missing).
     pub async fn ensure_scheme(&self, scheme_code: i64) -> Result<()> {
         let exists: Option<i32> = sqlx::query_scalar(
@@ -159,7 +179,10 @@ impl MfService {
         }
     }
 
-    /// Latest NAV on or after `sip_date` using mfapi date-range query.
+    /// First (earliest) NAV on or after `sip_date` using mfapi date-range query.
+    ///
+    /// Used for SIP/SWP materialization so the buy/sell lands on the next
+    /// available published NAV day rather than today's NAV.
     pub async fn nav_on_or_after(
         &self,
         scheme_code: i64,
@@ -170,7 +193,7 @@ impl MfService {
             .fetcher
             .fetch_nav_range(scheme_code, sip_date, &end_date)
             .await?;
-        latest_nav_on_or_after(&points, sip_date)
+        first_nav_on_or_after(&points, sip_date)
             .ok_or_else(|| {
                 Error::NotFound(format!(
                     "no NAV published on or after {sip_date} for scheme {scheme_code}"

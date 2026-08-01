@@ -122,9 +122,19 @@ pub async fn materialize_swp(
         .filter(|a| *a > 0.0)
         .ok_or_else(|| Error::InvalidInput("swp missing amount".into()))?;
 
-    let scheme_code = parse_mf_symbol(symbol)
-        .ok_or_else(|| Error::InvalidInput("swp requires MF symbol".into()))?;
+    let scheme_code = match parse_mf_symbol(symbol) {
+        Some(code) => code,
+        None => {
+            let mf = mf.ok_or_else(|| Error::Other("mutual fund service unavailable".into()))?;
+            mf.resolve_scheme_code(symbol)
+                .await
+                .map_err(|e| {
+                    Error::Other(format!("could not resolve mutual fund '{symbol}': {e}"))
+                })?
+        }
+    };
     let mf = mf.ok_or_else(|| Error::Other("mutual fund service unavailable".into()))?;
+    let resolved = stocker_mf::mf_symbol(scheme_code);
     let nav = mf
         .nav_on_or_after(scheme_code, &swp.trade_date)
         .await
@@ -135,19 +145,20 @@ pub async fn materialize_swp(
 
     if price <= 0.0 || quantity <= 0.0 {
         return Err(Error::InvalidInput(format!(
-            "invalid NAV/qty for {symbol}"
+            "invalid NAV/qty for {resolved}"
         )));
     }
 
     let ledger = ensure_ledger(pool, swp.portfolio_id, false).await?;
     let available = ledger
         .symbols
-        .get(symbol)
+        .get(&resolved)
+        .or_else(|| ledger.symbols.get(symbol))
         .map(|s| s.quantity)
         .unwrap_or(0.0);
     if quantity > available + 1e-6 {
         return Err(Error::InvalidInput(format!(
-            "swp quantity {quantity:.4} exceeds available {available:.4} for {symbol}"
+            "swp quantity {quantity:.4} exceeds available {available:.4} for {resolved}"
         )));
     }
 
@@ -159,7 +170,7 @@ pub async fn materialize_swp(
         portfolio_id: swp.portfolio_id,
         txn_type: TransactionType::Sell,
         trade_date,
-        symbol: Some(symbol.to_string()),
+        symbol: Some(resolved),
         quantity: Some(quantity),
         price: Some(price),
         gross_amount: Some(amount),

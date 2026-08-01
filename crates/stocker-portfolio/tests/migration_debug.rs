@@ -66,6 +66,60 @@ async fn diagnose_portfolio_migration_2() {
 }
 
 #[tokio::test]
+async fn repair_swapped_migration_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("portfolio.db");
+    let pool = stocker_portfolio::db::open(&path).await.unwrap();
+    pool.close().await;
+
+    let url = format!("sqlite://{}", path.display());
+    let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+        .unwrap()
+        .create_if_missing(false);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .unwrap();
+
+    let v2_checksum: Vec<u8> = sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 2")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let v4_checksum: Vec<u8> = sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 4")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE _sqlx_migrations SET description = ?, checksum = ? WHERE version = 2")
+        .bind("related symbol")
+        .bind(&v4_checksum)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE _sqlx_migrations SET description = ?, checksum = ? WHERE version = 4")
+        .bind("valuation snapshot")
+        .bind(&v2_checksum)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let pool = stocker_portfolio::db::open(&path).await.unwrap();
+    let v2: String = sqlx::query_scalar("SELECT description FROM _sqlx_migrations WHERE version = 2")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let v4: String = sqlx::query_scalar("SELECT description FROM _sqlx_migrations WHERE version = 4")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(v2, "valuation snapshot");
+    assert_eq!(v4, "related symbol");
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn open_applies_pending_migrations() {
     let path = stocker_portfolio::db::default_db_path();
     let pool = stocker_portfolio::db::open(&path).await.unwrap();

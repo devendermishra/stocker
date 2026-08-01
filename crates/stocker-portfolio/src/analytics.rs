@@ -158,12 +158,13 @@ impl PortfolioService {
                     return Ok(trimmed.to_string());
                 }
             }
+            return Ok(trimmed.to_string());
         }
 
-        if let Some(screener) = &self.screener {
-            if let Ok(resolved) = screener.resolve_symbol(trimmed).await {
-                return Ok(resolved);
-            }
+        // Equity tickers must never fall through to mutual-fund name search
+        // (e.g. when screener is unavailable).
+        if looks_like_india_equity_ticker(trimmed) {
+            return self.resolve_equity_symbol(trimmed).await;
         }
 
         if let Some(mf) = &self.mf {
@@ -174,7 +175,67 @@ impl PortfolioService {
             return Ok(stocker_mf::mf_symbol(code));
         }
 
-        Ok(trimmed.to_uppercase())
+        self.resolve_equity_symbol(trimmed).await
+    }
+
+    async fn resolve_equity_symbol(&self, trimmed: &str) -> Result<String> {
+        if let Some(screener) = &self.screener {
+            if let Ok(resolved) = screener.resolve_symbol(trimmed).await {
+                return Ok(resolved);
+            }
+        }
+        let ctx = stocker_core::default_india_symbol_context();
+        stocker_core::resolve_india_symbol(trimmed, &ctx)
+            .map_err(|e| crate::error::Error::InvalidInput(e.to_string()))
+    }
+}
+
+/// True for Yahoo-style India equity tickers (`CDSL.NS`, `RELIANCE`, `M&M`).
+/// Fund names (spaces / long prose) return false so they resolve via mfapi.
+fn looks_like_india_equity_ticker(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.ends_with(".NS") || upper.ends_with(".BO") {
+        return true;
+    }
+    trimmed.len() <= 20
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '&')
+}
+
+#[cfg(test)]
+mod resolve_symbol_tests {
+    use super::looks_like_india_equity_ticker;
+    use crate::PortfolioService;
+    use std::sync::Arc;
+    use stocker_mf::MfService;
+
+    #[test]
+    fn equity_ticker_heuristic() {
+        assert!(looks_like_india_equity_ticker("CDSL.NS"));
+        assert!(looks_like_india_equity_ticker("cdsl.ns"));
+        assert!(looks_like_india_equity_ticker("RELIANCE"));
+        assert!(looks_like_india_equity_ticker("M&M"));
+        assert!(looks_like_india_equity_ticker("BAJAJ-AUTO.BO"));
+        assert!(!looks_like_india_equity_ticker("Parag Parikh Flexi Cap"));
+        assert!(!looks_like_india_equity_ticker(
+            "PARAG PARIKH FLEXI CAP FUND - DIRECT PLAN - GROWTH.BO"
+        ));
+        assert!(!looks_like_india_equity_ticker("MF:122639"));
+    }
+
+    #[tokio::test]
+    async fn cds_ns_resolves_as_equity_when_screener_missing() {
+        let mf = MfService::open_memory().await.unwrap();
+        let svc = PortfolioService::open_memory_for_test(None, Some(Arc::new(mf)))
+            .await
+            .unwrap();
+        let resolved = svc.resolve_symbol("CDSL.NS").await.unwrap();
+        assert_eq!(resolved, "CDSL.NS");
     }
 }
 

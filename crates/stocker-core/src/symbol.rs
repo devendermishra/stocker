@@ -46,12 +46,17 @@ pub fn india_base_symbol(input: &str) -> Result<String, crate::StockerError> {
 /// - Explicit `.NS` input always maps to `.NS`.
 /// - Otherwise, if `base` is in `ctx.nse_bases` → `.NS`.
 /// - Else → `.BO`.
+///
+/// Rejects names with whitespace (fund names, company prose) — those are not tickers.
 pub fn resolve_india_symbol(
     input: &str,
     ctx: &IndiaSymbolContext,
 ) -> Result<String, crate::StockerError> {
     let s = input.trim();
     if s.is_empty() {
+        return Err(crate::StockerError::InvalidSymbol(input.to_string()));
+    }
+    if s.chars().any(char::is_whitespace) {
         return Err(crate::StockerError::InvalidSymbol(input.to_string()));
     }
     let upper = s.to_uppercase();
@@ -220,6 +225,17 @@ mod tests {
     #[test]
     fn preserves_existing_ns() {
         assert_eq!(normalize_nse_symbol("TCS.NS").unwrap(), "TCS.NS");
+    }
+
+    #[test]
+    fn resolve_rejects_fund_names_with_spaces() {
+        let ctx = ctx_with_nse(&[]);
+        assert!(resolve_india_symbol(
+            "PARAG PARIKH FLEXI CAP FUND - DIRECT PLAN - GROWTH.BO",
+            &ctx
+        )
+        .is_err());
+        assert!(resolve_india_symbol("Parag Parikh Flexi Cap", &ctx).is_err());
     }
 
     #[test]

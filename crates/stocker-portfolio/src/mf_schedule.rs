@@ -121,12 +121,26 @@ pub async fn load_covered_months(
         ScheduleType::Sip => "sip_refresh",
         ScheduleType::Swp => "swp_refresh",
     };
+    let corp_prefix = match schedule_type {
+        ScheduleType::Sip => "sip_buy:",
+        ScheduleType::Swp => "swp_sell:",
+    };
 
+    // Attribute materialized buys/sells to the parent SIP/SWP calendar month so a
+    // buy settled a few days later (next NAV day) does not mark the wrong month.
     let rows = sqlx::query(
-        "SELECT symbol, trade_date FROM transactions
-         WHERE portfolio_id = ? AND symbol LIKE 'MF:%'
-         AND (txn_type = ? OR (source = ? AND txn_type IN ('buy', 'sell')))",
+        "SELECT t.symbol AS symbol,
+                COALESCE(
+                    (SELECT p.trade_date FROM transactions p
+                     WHERE t.corporate_action_key = ? || CAST(p.id AS TEXT)
+                     LIMIT 1),
+                    t.trade_date
+                ) AS cover_date
+         FROM transactions t
+         WHERE t.portfolio_id = ? AND t.symbol LIKE 'MF:%'
+         AND (t.txn_type = ? OR (t.source = ? AND t.txn_type IN ('buy', 'sell')))",
     )
+    .bind(corp_prefix)
     .bind(portfolio_id)
     .bind(txn_type)
     .bind(materialized_source)
@@ -136,9 +150,9 @@ pub async fn load_covered_months(
     let mut out = HashSet::new();
     for row in rows {
         let symbol: String = row.try_get("symbol")?;
-        let trade_date: String = row.try_get("trade_date")?;
-        if trade_date.len() >= 7 {
-            out.insert(format!("{}:{}", symbol, &trade_date[..7]));
+        let cover_date: String = row.try_get("cover_date")?;
+        if cover_date.len() >= 7 {
+            out.insert(format!("{}:{}", symbol, &cover_date[..7]));
         }
     }
     Ok(out)
@@ -148,8 +162,10 @@ pub async fn count_schedule_installments(
     pool: &SqlitePool,
     schedule_id: i64,
 ) -> Result<i32> {
+    // Count only SIP/SWP installment rows — not the materialized buy/sell copies.
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transactions WHERE schedule_id = ?",
+        "SELECT COUNT(*) FROM transactions
+         WHERE schedule_id = ? AND txn_type IN ('sip', 'swp')",
     )
     .bind(schedule_id)
     .fetch_one(pool)
@@ -548,17 +564,33 @@ pub async fn suggest_missing_for_schedule(
     }
 
     let today = today_string();
+    let txn_type = schedule.schedule_type.txn_type().as_str();
+    // Advance from the last SIP/SWP installment only — materialized buy/sell dates
+    // can land on a later NAV day and must not skip the next calendar installment.
     let last_registered = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT MAX(trade_date) FROM transactions WHERE schedule_id = ?",
+        "SELECT MAX(trade_date) FROM transactions
+         WHERE schedule_id = ? AND txn_type = ?",
     )
     .bind(schedule.id)
+    .bind(txn_type)
     .fetch_one(pool)
     .await?
     .unwrap_or_else(|| schedule.start_date.clone());
 
     let sip_day = schedule.sip_day as u32;
     let mut cursor = parse_date(&last_registered)?;
-    cursor = add_months(cursor, 1);
+    // If no installment rows exist yet, include the start month; otherwise next month.
+    let has_installments = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM transactions WHERE schedule_id = ? AND txn_type = ?",
+    )
+    .bind(schedule.id)
+    .bind(txn_type)
+    .fetch_one(pool)
+    .await?
+        > 0;
+    if has_installments {
+        cursor = add_months(cursor, 1);
+    }
     cursor = clamp_day(cursor, sip_day);
 
     let upper = parse_date(&today)?;
@@ -805,5 +837,203 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("not both"));
+    }
+
+    #[tokio::test]
+    async fn count_installments_ignores_materialized_buys() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let user = ensure_local_user(&pool).await.unwrap();
+        let portfolio = portfolios::create(
+            &pool,
+            user.id,
+            &NewPortfolio {
+                name: "T".into(),
+                description: None,
+                base_currency: None,
+                portfolio_type: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let now = Utc::now().timestamp();
+        let schedule_id = sqlx::query(
+            "INSERT INTO mf_schedules (user_id, portfolio_id, schedule_type, symbol, amount,
+             start_date, end_date, installment_count, sip_day, status, created_at, updated_at)
+             VALUES (?, ?, 'sip', 'MF:122639', 1000, '2024-01-05', NULL, NULL, 5, 'active', ?, ?)",
+        )
+        .bind(user.id)
+        .bind(portfolio.id)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+
+        let sip_id = insert_installment(
+            &pool,
+            user.id,
+            portfolio.id,
+            schedule_id,
+            TransactionType::Sip,
+            "MF:122639",
+            "2024-01-05",
+            1000.0,
+        )
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO transactions (user_id, portfolio_id, txn_type, trade_date, symbol, quantity,
+             price, gross_amount, net_amount, source, corporate_action_key, schedule_id, created_at, updated_at)
+             VALUES (?, ?, 'buy', '2024-01-08', 'MF:122639', 10, 100, 1000, 1000, 'sip_refresh', ?, ?, ?, ?)",
+        )
+        .bind(user.id)
+        .bind(portfolio.id)
+        .bind(format!("sip_buy:{sip_id}"))
+        .bind(schedule_id)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(count_schedule_installments(&pool, schedule_id).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn covered_months_use_sip_calendar_month_not_buy_date() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let user = ensure_local_user(&pool).await.unwrap();
+        let portfolio = portfolios::create(
+            &pool,
+            user.id,
+            &NewPortfolio {
+                name: "T".into(),
+                description: None,
+                base_currency: None,
+                portfolio_type: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let now = Utc::now().timestamp();
+        let sip_id = sqlx::query(
+            "INSERT INTO transactions (user_id, portfolio_id, txn_type, trade_date, symbol,
+             gross_amount, net_amount, source, created_at, updated_at)
+             VALUES (?, ?, 'sip', '2024-06-30', 'MF:122639', 1000, 1000, 'mf_schedule', ?, ?)",
+        )
+        .bind(user.id)
+        .bind(portfolio.id)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+
+        // Buy settled on next NAV day in July must still cover June, not July.
+        sqlx::query(
+            "INSERT INTO transactions (user_id, portfolio_id, txn_type, trade_date, symbol, quantity,
+             price, gross_amount, net_amount, source, corporate_action_key, created_at, updated_at)
+             VALUES (?, ?, 'buy', '2024-07-01', 'MF:122639', 10, 100, 1000, 1000, 'sip_refresh', ?, ?, ?)",
+        )
+        .bind(user.id)
+        .bind(portfolio.id)
+        .bind(format!("sip_buy:{sip_id}"))
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let covered = load_covered_months(&pool, portfolio.id, ScheduleType::Sip)
+            .await
+            .unwrap();
+        assert!(covered.contains("MF:122639:2024-06"));
+        assert!(!covered.contains("MF:122639:2024-07"));
+    }
+
+    #[tokio::test]
+    async fn suggest_missing_advances_from_sip_not_buy_date() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let user = ensure_local_user(&pool).await.unwrap();
+        let portfolio = portfolios::create(
+            &pool,
+            user.id,
+            &NewPortfolio {
+                name: "T".into(),
+                description: None,
+                base_currency: None,
+                portfolio_type: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let now = Utc::now().timestamp();
+        let schedule_id = sqlx::query(
+            "INSERT INTO mf_schedules (user_id, portfolio_id, schedule_type, symbol, amount,
+             start_date, end_date, installment_count, sip_day, status, created_at, updated_at)
+             VALUES (?, ?, 'sip', 'MF:122639', 1000, '2024-01-05', NULL, NULL, 5, 'active', ?, ?)",
+        )
+        .bind(user.id)
+        .bind(portfolio.id)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+
+        let sip_id = insert_installment(
+            &pool,
+            user.id,
+            portfolio.id,
+            schedule_id,
+            TransactionType::Sip,
+            "MF:122639",
+            "2024-01-05",
+            1000.0,
+        )
+        .await
+        .unwrap();
+
+        // Materialized buy lands later in January — must not skip February.
+        sqlx::query(
+            "INSERT INTO transactions (user_id, portfolio_id, txn_type, trade_date, symbol, quantity,
+             price, gross_amount, net_amount, source, corporate_action_key, schedule_id, created_at, updated_at)
+             VALUES (?, ?, 'buy', '2024-01-20', 'MF:122639', 10, 100, 1000, 1000, 'sip_refresh', ?, ?, ?, ?)",
+        )
+        .bind(user.id)
+        .bind(portfolio.id)
+        .bind(format!("sip_buy:{sip_id}"))
+        .bind(schedule_id)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let schedule = get_active_schedules(&pool, portfolio.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // Freeze "today" by temporarily testing through compute path: call suggest with
+        // a schedule whose next month is still within a large upper bound via today_string.
+        // We only assert the first suggested date when today is past Feb 5.
+        // If the suite runs before 2024-02-05 in a time machine this still holds for real now.
+        let missing = suggest_missing_for_schedule(&pool, &schedule).await.unwrap();
+        if today_string().as_str() >= "2024-02-05" {
+            assert!(
+                missing.iter().any(|d| d.trade_date == "2024-02-05"),
+                "expected Feb installment, got {missing:?}"
+            );
+        }
     }
 }
