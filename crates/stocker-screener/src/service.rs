@@ -10,7 +10,7 @@ use crate::coverage::CoverageReport;
 use crate::error::{Error, Result};
 use crate::metrics::{MetricSpec, CATALOG};
 use crate::query::{run_query, ScreenQuery, ScreenRow};
-use crate::refresh::{BackfillStats, RefreshConfig, RefreshScheduler, SchedulerStatus};
+use crate::refresh::{BackfillStats, RefreshConfig, RefreshScheduler, SchedulerStatus, SectorBackfillStats};
 use crate::screens::{self, NewSavedScreen, SavedScreen};
 use crate::{db, refresh};
 
@@ -57,6 +57,39 @@ impl ScreenerService {
         let n = refresh::reset_refresh_jobs(&self.pool).await?;
         log::info!("backfill: reset {n} symbols");
         refresh::backfill_all(&self.pool, config).await
+    }
+
+    /// Backfill only the sector/industry labels for symbols missing a sector,
+    /// using the lightweight Yahoo asset-profile fetch (no full refresh).
+    pub async fn backfill_sectors(&self, config: &RefreshConfig) -> Result<SectorBackfillStats> {
+        refresh::backfill_sectors(&self.pool, config).await
+    }
+
+    /// Start a sector-label backfill in the background (reuses the backfill lock).
+    /// Returns [`Error::AlreadyRunning`] if any backfill is already in progress.
+    pub fn try_start_sector_backfill(&self, config: RefreshConfig) -> Result<()> {
+        if self
+            .backfill_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(Error::AlreadyRunning);
+        }
+        let svc = self.clone();
+        tokio::spawn(async move {
+            match svc.backfill_sectors(&config).await {
+                Ok(stats) => log::info!(
+                    "sector backfill finished: {} scanned, {} filled, {} still missing, {} errors",
+                    stats.scanned,
+                    stats.filled,
+                    stats.still_missing,
+                    stats.errors
+                ),
+                Err(e) => log::warn!("sector backfill failed: {e}"),
+            }
+            svc.backfill_running.store(false, Ordering::Relaxed);
+        });
+        Ok(())
     }
 
     /// Start a universe backfill in the background. Returns [`Error::AlreadyRunning`]
@@ -174,5 +207,13 @@ impl ScreenerService {
     /// Underlying pool (for advanced uses like the CLI dump).
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub async fn list_sectors(&self) -> Result<Vec<crate::sectors::SectorListItem>> {
+        crate::sectors::list_sectors(&self.pool).await
+    }
+
+    pub async fn sector_detail(&self, sector: &str) -> Result<crate::sectors::SectorDetail> {
+        crate::sectors::sector_detail(&self.pool, sector).await
     }
 }

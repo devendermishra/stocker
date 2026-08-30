@@ -6,6 +6,8 @@
 
 pub mod analysis;
 pub mod bank_metrics;
+pub mod financial_company;
+pub mod canonical;
 pub mod fetcher;
 mod fundamentals_timeseries;
 pub mod financial_strength_audit;
@@ -17,19 +19,32 @@ pub mod paths;
 pub mod report;
 pub mod research_summary;
 pub mod sector;
+pub mod sector_research;
+pub mod series_integrity;
 pub mod statements;
 pub mod stock_scoring;
 pub mod symbol;
 pub mod technical_analysis;
 pub mod technical_entry_signal;
 pub mod valuation_analysis;
+pub mod yahoo_metrics;
 
 pub use models::*;
+pub use canonical::{build_canonical, build_canonical_for, peer_comparability};
+pub use yahoo_metrics::{
+    canonical_statement_fcf, earnings_yield_eps_pct, fcf_yield_pct, local_roce,
+    normalize_debt_to_equity, report_fcf, resolve_enterprise_value,
+};
 pub use financial_strength_audit::{
-    build_action_guidance, build_financial_strength_audit, cumulative_cfo_pat_for_bundle,
+    build_action_guidance, build_financial_strength_audit, build_financial_strength_audit_for,
+    cumulative_cfo_pat_for_bundle,
 };
 pub use math::{cagr, median, pct_change};
 pub use report::{ResearchReport, build_research_report};
+pub use sector_research::{
+    compute_sector_research_profile, sector_inputs_from_aggregates, sector_inputs_from_quotes,
+    SectorCohortRow,
+};
 pub use symbol::{
     default_india_symbol_context, india_base_symbol, india_display_ticker, india_exchange_label,
     normalize_nse_symbol, nse_csv_indices, resolve_india_symbol, to_yahoo_bse_symbol,

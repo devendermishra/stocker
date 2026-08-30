@@ -7,17 +7,65 @@ use crate::types::ResearchReport;
 
 pub fn framework_tab(r: &ResearchReport) -> Element {
     let card = CARD;
+    let score_headline = if r.score_breakdown.score_provisional {
+        format!(
+            "Provisional screening score: {} ({})",
+            r.score_breakdown
+                .provisional_screening_score
+                .or(r.score_breakdown.total_score)
+                .map(|s| format!("{:.1}", s))
+                .unwrap_or_else(|| "N/A".to_string()),
+            r.score_breakdown.interpretation
+        )
+    } else {
+        format!(
+            "Investment score: {}/100 ({})",
+            r.score_breakdown
+                .total_score
+                .map(|s| format!("{:.1}", s))
+                .unwrap_or_else(|| "N/A".to_string()),
+            r.score_breakdown.interpretation
+        )
+    };
+    let eq_disp = r
+        .financial_strength_audit
+        .earnings_quality_score
+        .map(|s| format!("{:.0}/100", s))
+        .unwrap_or_else(|| "N/A".to_string());
+    let bs_disp = r
+        .financial_strength_audit
+        .balance_sheet_score
+        .map(|s| format!("{:.0}/100", s))
+        .unwrap_or_else(|| "N/A".to_string());
     rsx! {
         section { style: "{card}",
             h3 { style: "margin-top:0;", "Weighted Scorecard" }
-            p { "Total Score: {r.score_breakdown.total_score:.1}/100 ({r.score_breakdown.interpretation})" }
-            KeyValue { label: "Business Quality (20)", value: format!("{:.1}", r.score_breakdown.business_quality) }
-            KeyValue { label: "Industry Tailwind (15)", value: format!("{:.1}", r.score_breakdown.industry_tailwind) }
-            KeyValue { label: "Financial Strength (20)", value: format!("{:.1}", r.score_breakdown.financial_strength) }
-            KeyValue { label: "Management Quality (15)", value: format!("{:.1}", r.score_breakdown.management_quality) }
+            p { "{score_headline}" }
+            if r.score_breakdown.screening_score > 0.0 {
+                p { style: "font-size: 0.88rem; color:#5a6578;", "Screening model (factor sum): {r.score_breakdown.screening_score:.1}/100" }
+            }
+            if r.score_breakdown.available_dimension_score.is_some() || r.score_breakdown.critical_coverage_pct.is_some() {
+                p { style: "font-size: 0.88rem; color:#5a6578;",
+                    {
+                        let avail = r.score_breakdown.available_dimension_score.map(|s| format!("{s:.1}")).unwrap_or_else(|| "N/A".to_string());
+                        let crit = r.score_breakdown.critical_coverage_pct.map(|s| format!("{s:.0}%")).unwrap_or_else(|| "n/a".to_string());
+                        format!("Available-metric score: {avail}/100 · Critical coverage: {crit}")
+                    }
+                }
+            }
+            KeyValue { label: "Business Quality (20)", value: r.score_breakdown.business_quality.map(|s| format!("{s:.1}")).unwrap_or_else(|| "N/A — not scored from data completeness".to_string()) }
+            KeyValue { label: "Industry Tailwind (15)", value: r.score_breakdown.industry_tailwind.map(|s| format!("{s:.1}")).unwrap_or_else(|| "N/A — no observed industry cycle data".to_string()) }
+            KeyValue { label: "Financial Strength (20)", value: r.score_breakdown.financial_strength.map(|s| format!("{:.1}", s)).unwrap_or_else(|| "N/A — not assessed".to_string()) }
+            KeyValue { label: "Management Quality (15)", value: r.score_breakdown.management_quality.map(|s| format!("{:.1}", s)).unwrap_or_else(|| "N/A — no governance data".to_string()) }
             KeyValue { label: "Valuation Comfort (15)", value: format!("{:.1}", r.score_breakdown.valuation_comfort) }
-            KeyValue { label: "Growth Triggers (10)", value: format!("{:.1}", r.score_breakdown.growth_triggers) }
-            KeyValue { label: "Risk/Reward (5)", value: format!("{:.1}", r.score_breakdown.risk_reward) }
+            KeyValue { label: "Growth trigger score (10)", value: r.score_breakdown.growth_triggers.map(|s| format!("{s:.1}")).unwrap_or_else(|| "N/A — no statement growth series".to_string()) }
+            KeyValue { label: "Risk/Reward (5)", value: r.score_breakdown.risk_reward.map(|s| format!("{s:.1}")).unwrap_or_else(|| "N/A — risk unassessed".to_string()) }
+            if !r.score_breakdown.score_provenance.is_empty() {
+                details { style: "margin-top:0.5rem; font-size:0.85rem; color:#5a6578;",
+                    summary { "Score provenance" }
+                    ul { for line in &r.score_breakdown.score_provenance { li { "{line}" } } }
+                }
+            }
         }
         section { style: "{card}; margin-top: 0.65rem;",
             h3 { style: "margin-top:0;", "16-Section Structured Review" }
@@ -29,10 +77,10 @@ pub fn framework_tab(r: &ResearchReport) -> Element {
             KeyValue { label: "6. Financial Performance", value: r.structured_sections.financial_performance.clone() }
             KeyValue { label: "7. Balance Sheet Strength", value: r.financial_strength_audit.interpretation.clone() }
             KeyValue { label: "8. Cash Flow Quality", value: r.structured_sections.cash_flow_quality.narrative.clone() }
-            KeyValue { label: "8b. Earnings quality score", value: format!("{:.0}/100", r.financial_strength_audit.earnings_quality_score) }
-            KeyValue { label: "8c. Balance sheet score", value: format!("{:.0}/100", r.financial_strength_audit.balance_sheet_score) }
+            KeyValue { label: "8b. Earnings quality score", value: eq_disp }
+            KeyValue { label: "8c. Balance sheet score", value: bs_disp }
             KeyValue { label: "9. Valuation", value: r.structured_sections.valuation.clone() }
-            KeyValue { label: "11. Growth Triggers", value: r.structured_sections.growth_triggers.join(", ") }
+            KeyValue { label: "11. Potential triggers to investigate", value: r.structured_sections.growth_triggers.join(", ") }
             KeyValue { label: "14. Entry/Exit Strategy", value: r.structured_sections.entry_exit_strategy.clone() }
             KeyValue { label: "16. Final Recommendation", value: r.structured_sections.final_recommendation.clone() }
         }

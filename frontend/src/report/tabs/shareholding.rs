@@ -20,33 +20,33 @@ pub fn shareholding_tab(r: &ResearchReport) -> Element {
             table { style: "width:100%; border-collapse: collapse; font-size: 0.9rem;",
                 tbody {
                     tr {
-                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "Promoter / Insider" }
+                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "Yahoo insiders % held" }
                         td { style: "padding:0.35rem 0; border-top:1px solid #eceff5; font-weight:600;",
-                            {fmt_opt_pct(sh.promoter_percent.map(|v| v * 100.0))}
+                            {fmt_opt_pct(Some(sh.insiders_percent * 100.0))}
                         }
                     }
                     tr {
-                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "Institutional (FII + DII proxy)" }
+                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "Yahoo institutions % held" }
                         td { style: "padding:0.35rem 0; border-top:1px solid #eceff5; font-weight:600;",
                             {fmt_opt_pct(Some(sh.institutions_percent * 100.0))}
                         }
                     }
                     tr {
-                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "FII (float-held proxy)" }
+                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "FII / promoter / MF (Indian filings)" }
                         td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;",
-                            {fmt_opt_pct(sh.fii_percent.map(|v| v * 100.0))}
+                            "Not mapped from Yahoo — use NSE/BSE shareholding pattern"
                         }
                     }
                     tr {
-                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "Mutual funds" }
+                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "Mutual funds (Yahoo — not Indian MF category)" }
                         td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;",
-                            {fmt_opt_pct(sh.mutual_fund_percent.map(|v| v * 100.0))}
+                            "—"
                         }
                     }
                     tr {
-                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "Retail (estimate)" }
+                        td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;", "Retail" }
                         td { style: "padding:0.35rem 0; border-top:1px solid #eceff5;",
-                            {fmt_opt_pct(sh.retail_percent.map(|v| v * 100.0))}
+                            "Not inferred from Yahoo insiders %"
                         }
                     }
                     tr {

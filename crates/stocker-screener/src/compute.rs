@@ -119,7 +119,8 @@ fn chart_day_change_pct(chart: &ChartHistory) -> Option<f64> {
 }
 
 fn resolve_pat_ttm(f: &Financials, income_q: &[&IncomeStatementRow]) -> Option<f64> {
-    finite(f.net_income)
+    f.net_income
+        .and_then(finite)
         .filter(|v| v.abs() > 1e-9)
         .or_else(|| {
             if f.trailing_eps.abs() > 1e-9 && f.shares_outstanding > 0.0 {
@@ -195,8 +196,8 @@ fn resolve_net_worth(f: &Financials, balance_a: &[&BalanceSheetRow], book_per_sh
 }
 
 fn resolve_cfo_ttm(f: &Financials, cashflow_q: &[&CashflowRow]) -> f64 {
-    if f.operating_cashflow.abs() > 1e-3 {
-        f.operating_cashflow
+    if let Some(cfo) = f.operating_cashflow.filter(|c| c.abs() > 1e-3) {
+        cfo
     } else if cashflow_q.len() >= 4 {
         cashflow_q[cashflow_q.len() - 4..]
             .iter()
@@ -207,35 +208,37 @@ fn resolve_cfo_ttm(f: &Financials, cashflow_q: &[&CashflowRow]) -> f64 {
     }
 }
 
-fn resolve_fcf_ttm(f: &Financials, cashflow_q: &[&CashflowRow], cash_a: &[&CashflowRow]) -> f64 {
-    if f.free_cashflow.abs() > 1e-3 {
-        f.free_cashflow
-    } else if cashflow_q.len() >= 4 {
-        cashflow_q[cashflow_q.len() - 4..]
+/// Statement FCF (CFO − capex). Never Yahoo levered `freeCashflow`.
+fn statement_fcf(row: &CashflowRow) -> Option<f64> {
+    stocker_core::yahoo_metrics::row_statement_fcf(row)
+}
+
+fn resolve_fcf_ttm(_f: &Financials, cashflow_q: &[&CashflowRow], cash_a: &[&CashflowRow]) -> f64 {
+    if cashflow_q.len() >= 4 {
+        let sum: f64 = cashflow_q[cashflow_q.len() - 4..]
             .iter()
-            .map(|r| r.free_cashflow)
-            .sum()
-    } else if let Some(latest_cf) = latest(cash_a) {
-        if latest_cf.free_cashflow.abs() > 1e-3 {
-            latest_cf.free_cashflow
-        } else {
-            latest_cf.operating_cashflow - latest_cf.capital_expenditure
+            .filter_map(|r| statement_fcf(r))
+            .sum();
+        if sum.abs() > 1e-3 {
+            return sum;
         }
-    } else {
-        0.0
     }
+    latest(cash_a).and_then(statement_fcf).unwrap_or(0.0)
+}
+
+fn fcf_sum_last_n(cash_a: &[&CashflowRow], n: usize) -> Option<f64> {
+    if n == 0 || cash_a.len() < n {
+        return None;
+    }
+    let mut sum = 0.0;
+    for r in &cash_a[cash_a.len() - n..] {
+        sum += statement_fcf(r)?;
+    }
+    Some(sum)
 }
 
 fn fcf_3y_sum(cash_a: &[&CashflowRow]) -> Option<f64> {
-    if cash_a.len() < 3 {
-        return None;
-    }
-    Some(
-        cash_a[cash_a.len() - 3..]
-            .iter()
-            .map(|r| r.free_cashflow)
-            .sum(),
-    )
+    fcf_sum_last_n(cash_a, 3)
 }
 
 fn compute_price_to_fcf(
@@ -266,13 +269,13 @@ fn compute_price_to_fcf(
 
 /// Enterprise value from Yahoo, or market cap + debt − cash when missing.
 fn enterprise_value(f: &Financials) -> f64 {
-    if f.enterprise_value > 0.0 {
-        f.enterprise_value
-    } else if f.market_cap > 0.0 {
-        (f.market_cap + f.total_debt - f.total_cash).max(0.0)
-    } else {
-        0.0
-    }
+    stocker_core::resolve_enterprise_value(
+        f.enterprise_value,
+        f.market_cap,
+        f.total_debt,
+        f.total_cash,
+    )
+    .unwrap_or(0.0)
 }
 
 /// Trading-day count for given calendar window. Yahoo daily series ~ 252/yr.
@@ -437,8 +440,15 @@ fn growth_ttm_or_annual<F: Fn(&IncomeStatementRow) -> f64>(
     income_q: &[&IncomeStatementRow],
     income_a: &[&IncomeStatementRow],
     f: F,
+    yahoo_latest_yoy: Option<f64>,
 ) -> Option<f64> {
-    ttm_growth_pct(income_q, &f).or_else(|| annual_two_year_growth_pct(income_a, f))
+    ttm_growth_pct(income_q, &f).or_else(|| {
+        let values: Vec<f64> = income_a.iter().map(|r| f(r)).collect();
+        if !stocker_core::series_integrity::latest_step_usable(&values, yahoo_latest_yoy) {
+            return None;
+        }
+        annual_two_year_growth_pct(income_a, f)
+    })
 }
 
 fn resolve_ttm_ebit(
@@ -647,8 +657,8 @@ fn compute_market_structure_metrics(out: &mut HashMap<MetricId, Option<f64>>, ct
         0.0
     };
     out.insert(MetricId::MarketCap, pos(ctx.mcap));
-    ctx.ev = if ctx.f.enterprise_value > 0.0 {
-        ctx.f.enterprise_value
+    ctx.ev = if let Some(ev) = ctx.f.enterprise_value.filter(|v| *v > 0.0) {
+        ev
     } else if ctx.mcap > 0.0 {
         (ctx.mcap + ctx.f.total_debt - ctx.f.total_cash).max(0.0)
     } else {
@@ -694,7 +704,7 @@ fn compute_valuation_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &mut
         0.0
     };
     out.insert(MetricId::PeRatio, pos(ctx.pe));
-    out.insert(MetricId::ForwardPe, pos(ctx.f.forward_pe));
+    out.insert(MetricId::ForwardPe, ctx.f.forward_pe.filter(|v| *v > 0.0));
     out.insert(MetricId::PriceToBook, pos(ctx.pb));
     out.insert(MetricId::PriceToSales, pos(ctx.ps));
 
@@ -711,11 +721,17 @@ fn compute_valuation_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &mut
         }
     }
 
-    let ev_to_ebitda = if ctx.ev > 0.0 && ctx.f.ebitda > 0.0 {
-        Some(ctx.ev / ctx.f.ebitda)
-    } else {
-        None
-    };
+    let ev_to_ebitda = ctx
+        .f
+        .yahoo_ev_to_ebitda
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .or_else(|| {
+            if ctx.ev > 0.0 && ctx.f.ebitda > 0.0 {
+                Some(ctx.ev / ctx.f.ebitda)
+            } else {
+                None
+            }
+        });
     out.insert(MetricId::EvToEbitda, ev_to_ebitda);
     let ev_to_sales = if ctx.ev > 0.0 && ctx.revenue > 0.0 {
         Some(ctx.ev / ctx.revenue)
@@ -748,7 +764,7 @@ fn compute_valuation_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &mut
 
     // Intrinsic value (modified Graham): EPS x (8.5 + 2g) x 4.4 / Y
     // where g = 3y profit growth %, Y = current AAA yield (assume 7.0% for India).
-    ctx.profit_g_3y = compute_profit_3y_cagr_pct(&ctx.income_a);
+    ctx.profit_g_3y = compute_profit_3y_cagr_pct(&ctx.income_a, ctx.f.net_income);
     if ctx.eps > 0.0 {
         if let Some(g) = ctx.profit_g_3y {
             let g_capped = g.min(20.0).max(-5.0);
@@ -823,18 +839,27 @@ fn compute_income_margin_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: 
     out.insert(MetricId::SalesLastYear, latest(&ctx.income_a).map(|r| r.revenue).and_then(pos));
     out.insert(MetricId::SalesLatestQuarter, latest(&ctx.income_q).map(|r| r.revenue).and_then(pos));
 
+    let quote_rev = (ctx.f.revenue > 1.0).then_some(ctx.f.revenue);
     out.insert(
         MetricId::SalesGrowthTtmPct,
-        growth_ttm_or_annual(&ctx.income_q, &ctx.income_a, |r| r.revenue),
+        growth_ttm_or_annual(
+            &ctx.income_q,
+            &ctx.income_a,
+            |r| r.revenue,
+            ctx.f.revenue_growth,
+        ),
     );
-    out.insert(MetricId::SalesGrowth3yCagrPct, annual_cagr_pct(&ctx.income_a, 3, |r| r.revenue));
+    out.insert(
+        MetricId::SalesGrowth3yCagrPct,
+        annual_cagr_pct(&ctx.income_a, 3, |r| r.revenue, ctx.f.revenue_growth, quote_rev),
+    );
     out.insert(
         MetricId::SalesGrowth5yCagrPct,
-        annual_cagr_with_fallback(&ctx.income_a, 5, |r| r.revenue),
+        annual_cagr_with_fallback(&ctx.income_a, 5, |r| r.revenue, ctx.f.revenue_growth, quote_rev),
     );
     out.insert(
         MetricId::SalesGrowth7yCagrPct,
-        annual_cagr_with_fallback(&ctx.income_a, 7, |r| r.revenue),
+        annual_cagr_with_fallback(&ctx.income_a, 7, |r| r.revenue, ctx.f.revenue_growth, quote_rev),
     );
     if quarterly_metrics_allowed(&ctx.income_q) {
         out.insert(
@@ -868,26 +893,18 @@ fn compute_income_margin_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: 
 
     out.insert(
         MetricId::ProfitGrowthTtmPct,
-        growth_ttm_or_annual(&ctx.income_q, &ctx.income_a, |r| r.net_income),
+        growth_ttm_or_annual(&ctx.income_q, &ctx.income_a, |r| r.net_income, None),
     );
     out.insert(MetricId::ProfitGrowth3yCagrPct, ctx.profit_g_3y);
     out.insert(
         MetricId::ProfitGrowth5yCagrPct,
-        annual_cagr_with_fallback(&ctx.income_a, 5, |r| r.net_income),
+        annual_cagr_with_fallback(&ctx.income_a, 5, |r| r.net_income, None, ctx.f.net_income),
     );
     if ctx.pe > 0.0 {
-        let peg = ctx.profit_g_3y
+        let peg = ctx
+            .profit_g_3y
             .filter(|g| *g > 0.0)
-            .map(|g| ctx.pe / g)
-            .or_else(|| {
-                if ctx.f.earnings_growth > 0.0 {
-                    Some(ctx.pe / (ctx.f.earnings_growth * 100.0))
-                } else if ctx.f.revenue_growth > 0.0 {
-                    Some(ctx.pe / (ctx.f.revenue_growth * 100.0))
-                } else {
-                    None
-                }
-            });
+            .map(|g| ctx.pe / g);
         out.insert(MetricId::PegRatio, peg.filter(|v| v.is_finite() && *v > 0.0));
     }
     if quarterly_metrics_allowed(&ctx.income_q) {
@@ -903,17 +920,17 @@ fn compute_income_margin_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: 
 
     out.insert(MetricId::Ebitda, pos(ctx.f.ebitda));
     let ebitda_margin = if ctx.f.ebitda_margins.abs() > 1e-9 {
-        ctx.f.ebitda_margins
+        Some(ctx.f.ebitda_margins)
     } else if let Some(r) = latest(&ctx.income_a) {
         if r.revenue > 0.0 && r.ebitda > 0.0 {
-            r.ebitda / r.revenue
+            Some(r.ebitda / r.revenue)
         } else {
-            0.0
+            None
         }
     } else {
-        0.0
+        None
     };
-    out.insert(MetricId::EbitdaMargins, finite(ebitda_margin).filter(|v| *v != 0.0));
+    out.insert(MetricId::EbitdaMargins, ebitda_margin.and_then(finite));
     out.insert(
         MetricId::OperatingProfitPrecedingYearQuarter,
         nth_from_back(&ctx.income_q, 3)
@@ -1055,7 +1072,7 @@ fn compute_income_margin_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: 
 fn compute_returns_efficiency_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
     out.insert(
         MetricId::ReturnOnEquity,
-        statement_roe(&ctx.income_a, &ctx.balance_a, ctx.net_worth).or_else(|| finite(ctx.f.return_on_equity)),
+        statement_roe(&ctx.income_a, &ctx.balance_a, ctx.net_worth).or(ctx.f.return_on_equity),
     );
     out.insert(
         MetricId::ReturnOnAssets,
@@ -1088,7 +1105,7 @@ fn compute_balance_sheet_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: 
     );
     out.insert(MetricId::NetWorth, pos(ctx.net_worth));
     out.insert(MetricId::TotalDebt, pos(ctx.f.total_debt));
-    out.insert(MetricId::DebtToEquity, finite(ctx.f.debt_to_equity));
+    out.insert(MetricId::DebtToEquity, ctx.f.debt_to_equity.filter(|v| v.is_finite()));
     if let Some(b) = latest_b {
         if b.current_liabilities > 0.0 {
             out.insert(MetricId::CurrentRatio, Some(b.current_assets / b.current_liabilities));
@@ -1211,18 +1228,19 @@ fn compute_cashflow_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &Comp
     );
     out.insert(MetricId::CfoPatLatestYear, cfo_pat_latest_year(&ctx.income_a, &ctx.cash_a));
     out.insert(MetricId::OperatingCashflowTtm, finite(ctx.cfo_ttm));
-    out.insert(MetricId::FreeCashflowLastYear, latest(&ctx.cash_a).map(|r| r.free_cashflow).and_then(finite));
+    out.insert(
+        MetricId::FreeCashflowLastYear,
+        latest(&ctx.cash_a).and_then(statement_fcf).and_then(finite),
+    );
     out.insert(MetricId::FreeCashflowTtm, finite(ctx.fcf_ttm));
     if let Some(sum) = fcf_3y_sum(&ctx.cash_a) {
         out.insert(MetricId::FreeCashflow3ySum, Some(sum));
     }
     if !ctx.cash_a.is_empty() {
         let take = ctx.cash_a.len().min(5);
-        let s: f64 = ctx.cash_a[ctx.cash_a.len() - take..]
-            .iter()
-            .map(|r| r.free_cashflow)
-            .sum();
-        out.insert(MetricId::FreeCashflow5ySum, Some(s));
+        if let Some(s) = fcf_sum_last_n(&ctx.cash_a, take) {
+            out.insert(MetricId::FreeCashflow5ySum, Some(s));
+        }
     }
 }
 
@@ -1255,7 +1273,7 @@ fn compute_composite_scores(out: &mut HashMap<MetricId, Option<f64>>, ctx: &Comp
     out.insert(MetricId::PiotroskiFScore, piotroski);
     let g_factor = if ctx.income_a.len() >= 2 && ctx.balance_a.len() >= 2 {
         let computed_roe = statement_roe(&ctx.income_a, &ctx.balance_a, ctx.net_worth)
-            .or_else(|| finite(ctx.f.return_on_equity));
+            .or(ctx.f.return_on_equity);
         g_factor(&ctx.income_a, &ctx.balance_a, &ctx.cash_a, computed_roe)
     } else {
         None
@@ -1364,13 +1382,16 @@ fn annual_cagr_pct<F: Fn(&IncomeStatementRow) -> f64>(
     rows: &[&IncomeStatementRow],
     years: usize,
     f: F,
+    yahoo_latest_yoy: Option<f64>,
+    quote_ttm: Option<f64>,
 ) -> Option<f64> {
-    if rows.len() < years + 1 {
-        return None;
+    let values: Vec<f64> = rows.iter().map(|r| f(r)).collect();
+    if let Some(&latest) = values.last() {
+        if !stocker_core::series_integrity::aligns_with_quote(latest, quote_ttm) {
+            return None;
+        }
     }
-    let last = f(rows[rows.len() - 1]);
-    let first = f(rows[rows.len() - 1 - years]);
-    cagr(first, last, years as f64)
+    stocker_core::series_integrity::trailing_cagr_pct(&values, years, yahoo_latest_yoy).value
 }
 
 /// CAGR for a target horizon (5Y / 7Y), falling back to shorter spans when Yahoo only returns ~4 annual periods.
@@ -1378,6 +1399,8 @@ fn annual_cagr_with_fallback<F: Fn(&IncomeStatementRow) -> f64>(
     rows: &[&IncomeStatementRow],
     target_years: usize,
     f: F,
+    yahoo_latest_yoy: Option<f64>,
+    quote_ttm: Option<f64>,
 ) -> Option<f64> {
     let chain: &[usize] = match target_years {
         7 => &[7, 5, 4, 3],
@@ -1388,15 +1411,15 @@ fn annual_cagr_with_fallback<F: Fn(&IncomeStatementRow) -> f64>(
         if years > target_years {
             continue;
         }
-        if let Some(v) = annual_cagr_pct(rows, years, &f) {
+        if let Some(v) = annual_cagr_pct(rows, years, &f, yahoo_latest_yoy, quote_ttm) {
             return Some(v);
         }
     }
     None
 }
 
-fn compute_profit_3y_cagr_pct(rows: &[&IncomeStatementRow]) -> Option<f64> {
-    annual_cagr_pct(rows, 3, |r| r.net_income)
+fn compute_profit_3y_cagr_pct(rows: &[&IncomeStatementRow], quote_ttm: Option<f64>) -> Option<f64> {
+    annual_cagr_pct(rows, 3, |r| r.net_income, None, quote_ttm)
 }
 
 fn ttm_depreciation(rows: &[&IncomeStatementRow]) -> Option<f64> {
@@ -1690,9 +1713,9 @@ fn g_factor(
             s += 1.0;
         }
     }
-    // 2. FCF > 0
+    // 2. FCF > 0 (CFO − capex, not Yahoo levered FCF)
     if let Some(c) = cur_c {
-        if c.free_cashflow > 0.0 {
+        if statement_fcf(c).unwrap_or(0.0) > 0.0 {
             s += 1.0;
         }
     }
@@ -1771,8 +1794,8 @@ mod tests {
             })
             .collect();
         let refs: Vec<&IncomeStatementRow> = rows.iter().collect();
-        assert!(annual_cagr_with_fallback(&refs, 5, |r| r.revenue).is_some());
-        assert!(annual_cagr_pct(&refs, 5, |r| r.revenue).is_none());
+        assert!(annual_cagr_with_fallback(&refs, 5, |r| r.revenue, None, None).is_some());
+        assert!(annual_cagr_pct(&refs, 5, |r| r.revenue, None, None).is_none());
     }
 
     #[test]
@@ -1824,21 +1847,27 @@ mod tests {
                 end_ts: None,
                 operating_cashflow: 100.0,
                 capital_expenditure: 10.0,
-                free_cashflow: -50.0,
+                free_cashflow: 999.0,
+                calculated_fcf: Some(-50.0),
+                ..Default::default()
             },
             CashflowRow {
                 end_date_fmt: "2022".into(),
                 end_ts: None,
                 operating_cashflow: 100.0,
                 capital_expenditure: 10.0,
-                free_cashflow: 100.0,
+                free_cashflow: 999.0,
+                calculated_fcf: Some(100.0),
+                ..Default::default()
             },
             CashflowRow {
                 end_date_fmt: "2023".into(),
                 end_ts: None,
                 operating_cashflow: 100.0,
                 capital_expenditure: 10.0,
-                free_cashflow: 100.0,
+                free_cashflow: 999.0,
+                calculated_fcf: Some(100.0),
+                ..Default::default()
             },
         ];
         let refs: Vec<&CashflowRow> = cash_a.iter().collect();
@@ -1874,9 +1903,13 @@ mod tests {
             income_tax_expense: 0.0,
             depreciation: 0.0,
             net_income: 150.0,
+            net_income_yahoo_row: None,
+            period_type: String::new(),
             diluted_eps: None,
             other_income_expense: 0.0,
             net_interest_income: 0.0,
+            interest_income: 0.0,
+            other_income: 0.0,
         };
         assert_eq!(ebit_from_income(&row), Some(250.0));
     }
@@ -1898,9 +1931,13 @@ mod tests {
                 income_tax_expense: 0.0,
                 depreciation: 0.0,
                 net_income: 10.0,
+                net_income_yahoo_row: None,
+                period_type: String::new(),
                 diluted_eps: None,
                 other_income_expense: 0.0,
                 net_interest_income: 0.0,
+                interest_income: 0.0,
+                other_income: 0.0,
             })
             .collect();
         let refs: Vec<&IncomeStatementRow> = rows.iter().collect();
@@ -1925,9 +1962,13 @@ mod tests {
             income_tax_expense: 0.0,
             depreciation: 0.0,
             net_income: 100.0,
+            net_income_yahoo_row: None,
+            period_type: String::new(),
             diluted_eps: None,
             other_income_expense: 0.0,
             net_interest_income: 0.0,
+            interest_income: 0.0,
+            other_income: 0.0,
         };
         assert_eq!(eps_from_row(&row, 10.0), Some(10.0));
     }
@@ -2133,5 +2174,75 @@ mod tests {
         let i_refs: Vec<&IncomeStatementRow> = income.iter().collect();
         let c_refs: Vec<&CashflowRow> = cash.iter().collect();
         assert!((cfo_pat_latest_year(&i_refs, &c_refs).unwrap() - 1.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn mixed_scope_sales_cagr_is_excluded() {
+        let rows = vec![
+            IncomeStatementRow { revenue: 5.29773e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 5.34534e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 5.17349e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 10.57219e12, ..IncomeStatementRow::default() },
+        ];
+        let refs: Vec<&IncomeStatementRow> = rows.iter().collect();
+        assert!(
+            annual_cagr_pct(&refs, 3, |r| r.revenue, Some(0.297), Some(11.30e12)).is_none(),
+            "standalone history + one consolidated year must not yield 3Y sales CAGR"
+        );
+    }
+
+    #[test]
+    fn consolidated_sales_cagr_matches_statement_series() {
+        let rows = vec![
+            IncomeStatementRow { revenue: 8.77835e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 9.01064e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 9.64693e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 10.57219e12, ..IncomeStatementRow::default() },
+        ];
+        let refs: Vec<&IncomeStatementRow> = rows.iter().collect();
+        let v = annual_cagr_pct(&refs, 3, |r| r.revenue, Some(0.297), Some(11.30e12)).unwrap();
+        assert!((v - 6.4).abs() < 0.3, "got {v}");
+    }
+
+    #[test]
+    fn sales_cagr_excluded_when_latest_fy_does_not_align_with_ttm() {
+        let rows = vec![
+            IncomeStatementRow { revenue: 5.0e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 5.1e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 5.2e12, ..IncomeStatementRow::default() },
+            IncomeStatementRow { revenue: 5.3e12, ..IncomeStatementRow::default() },
+        ];
+        let refs: Vec<&IncomeStatementRow> = rows.iter().collect();
+        assert!(annual_cagr_pct(&refs, 3, |r| r.revenue, None, Some(11.30e12)).is_none());
+    }
+
+    #[test]
+    fn fcf_ttm_uses_cfo_minus_capex_not_yahoo_levered() {
+        let f = Financials {
+            free_cashflow: Some(999.0),
+            ..Financials::default()
+        };
+        let annual = CashflowRow {
+            operating_cashflow: 100.0,
+            capital_expenditure: 10.0,
+            free_cashflow: 999.0,
+            calculated_fcf: Some(90.0),
+            ..CashflowRow::default()
+        };
+        let refs = vec![&annual];
+        assert!((resolve_fcf_ttm(&f, &[], &refs) - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn profit_cagr_does_not_use_yahoo_earnings_growth_as_fy_corroboration() {
+        // Large latest-step jump with no corroboration must exclude PAT CAGR.
+        let rows = vec![
+            IncomeStatementRow { net_income: 100.0, ..IncomeStatementRow::default() },
+            IncomeStatementRow { net_income: 110.0, ..IncomeStatementRow::default() },
+            IncomeStatementRow { net_income: 120.0, ..IncomeStatementRow::default() },
+            IncomeStatementRow { net_income: 400.0, ..IncomeStatementRow::default() },
+        ];
+        let refs: Vec<&IncomeStatementRow> = rows.iter().collect();
+        assert!(compute_profit_3y_cagr_pct(&refs, None).is_none());
     }
 }

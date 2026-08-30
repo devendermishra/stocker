@@ -31,25 +31,20 @@ fn avg_maintenance_capex(bundle: &StatementBundle, years: usize) -> Option<f64> 
 }
 
 fn owner_earnings_from(financials: &Financials, bundle: &StatementBundle) -> (Option<f64>, Option<f64>) {
-    let cfo = if financials.operating_cashflow.abs() > 0.0 {
-        financials.operating_cashflow
-    } else {
+    let cfo = financials.operating_cashflow.filter(|c| c.abs() > 0.0).unwrap_or_else(|| {
         bundle
             .cashflow_annual
             .first()
             .map(|r| r.operating_cashflow)
             .unwrap_or(0.0)
-    };
+    });
     if cfo <= 0.0 {
         return (None, None);
     }
     let maint = avg_maintenance_capex(bundle, 3)
-        .or_else(|| {
-            if financials.free_cashflow != 0.0 || cfo != 0.0 {
-                Some((cfo - financials.free_cashflow).max(0.0))
-            } else {
-                None
-            }
+        .or_else(|| match financials.free_cashflow {
+            Some(fcf) => Some((cfo - fcf).max(0.0)),
+            None => None,
         })
         .unwrap_or(0.0);
     let oe = cfo - maint;
@@ -190,7 +185,7 @@ fn infer_moat_types(
         }
     }
     if financials.operating_margins > 0.18
-        && financials.revenue_growth > 0.03
+        && financials.revenue_growth.map(|g| g > 0.03).unwrap_or(false)
         && margin_trend != "Compressing"
     {
         hits.push(MoatTypeHit {
@@ -212,13 +207,14 @@ fn compute_moat_score(
     cfo_pat_3y: Option<f64>,
 ) -> f64 {
     let mut score = 38.0_f64;
-    let roe = financials.return_on_equity * 100.0;
-    if roe > 18.0 {
-        score += 16.0;
-    } else if roe > 12.0 {
-        score += 9.0;
-    } else if roe < 5.0 {
-        score -= 10.0;
+    if let Some(roe) = financials.return_on_equity.map(|r| r * 100.0) {
+        if roe > 18.0 {
+            score += 16.0;
+        } else if roe > 12.0 {
+            score += 9.0;
+        } else if roe < 5.0 {
+            score -= 10.0;
+        }
     }
     if let Some(roce) = financials.return_on_capital_employed {
         let r = roce * 100.0;
@@ -250,14 +246,16 @@ fn compute_moat_score(
             score -= 10.0;
         }
     }
-    if financials.free_cashflow > 0.0 {
-        score += 6.0;
-    } else if financials.net_income > 0.0 {
-        score -= 8.0;
+    if let Some(fcf) = financials.free_cashflow {
+        if fcf > 0.0 {
+            score += 6.0;
+        } else if financials.net_income.map(|n| n > 0.0).unwrap_or(false) {
+            score -= 8.0;
+        }
     }
-    if financials.revenue_growth > 0.08 {
+    if financials.revenue_growth.map(|g| g > 0.08).unwrap_or(false) {
         score += 5.0;
-    } else if financials.revenue_growth < 0.0 {
+    } else if financials.revenue_growth.map(|g| g < 0.0).unwrap_or(false) {
         score -= 5.0;
     }
     if let Some(vol) = ni_volatility(bundle) {
@@ -312,14 +310,13 @@ fn capital_intensity_score(
     bundle: &StatementBundle,
     profile: &AssetProfile,
 ) -> f64 {
-    let cfo = financials.operating_cashflow.max(1.0);
+    let cfo = financials.operating_cashflow.unwrap_or(0.0).max(1.0);
     let capex_ratio = avg_maintenance_capex(bundle, 3)
         .map(|c| c / cfo)
         .unwrap_or_else(|| {
-            if cfo > 0.0 {
-                ((cfo - financials.free_cashflow).max(0.0)) / cfo
-            } else {
-                1.0
+            match financials.free_cashflow {
+                Some(fcf) if cfo > 0.0 => ((cfo - fcf).max(0.0)) / cfo,
+                _ => 1.0,
             }
         });
     let mut score = 70.0 - capex_ratio * 80.0;
@@ -350,10 +347,12 @@ fn management_trust_score(
             score -= 15.0;
         }
     }
-    if financials.debt_to_equity < 0.50 {
-        score += 10.0;
-    } else if financials.debt_to_equity > 1.0 {
-        score -= 15.0;
+    if let Some(de) = financials.debt_to_equity {
+        if de < 0.50 {
+            score += 10.0;
+        } else if de > 1.0 {
+            score -= 15.0;
+        }
     }
     if let Some(ic) = inputs.interest_coverage {
         if ic >= 4.0 {
@@ -362,7 +361,7 @@ fn management_trust_score(
             score -= 12.0;
         }
     }
-    let roe = financials.return_on_equity * 100.0;
+    let roe = financials.return_on_equity.unwrap_or(0.0) * 100.0;
     if roe > 15.0 {
         score += 10.0;
     } else if roe < 6.0 {
@@ -462,7 +461,7 @@ fn build_score_reasons(
     fair_value: f64,
     audit: &FinancialStrengthAudit,
 ) -> Vec<BuffettScoreReason> {
-    let roe = financials.return_on_equity * 100.0;
+    let roe = financials.return_on_equity.unwrap_or(0.0) * 100.0;
     let mut moat_bits = vec![format!("ROE {:.1}%", roe)];
     if let Some(roce) = financials.return_on_capital_employed {
         moat_bits.push(format!("ROCE {:.1}%", roce * 100.0));
@@ -472,7 +471,7 @@ fn build_score_reasons(
     if let Some(r) = cfo_pat_3y {
         moat_bits.push(format!("3Y CFO/PAT {:.2}", r));
     }
-    if financials.free_cashflow <= 0.0 && financials.net_income > 0.0 {
+    if financials.free_cashflow.map(|f| f <= 0.0).unwrap_or(false) && financials.net_income.map(|n| n > 0.0).unwrap_or(false) {
         moat_bits.push("positive PAT but weak FCF".to_string());
     }
 
@@ -488,15 +487,14 @@ fn build_score_reasons(
             if r >= 1.0 { "supports" } else { "weakens" }
         ));
     }
-    if audit.earnings_quality_score > 0.0 {
-        dur_bits.push(format!(
-            "financial strength audit {:.0}/100",
-            audit.earnings_quality_score
-        ));
+    if let Some(eq) = audit.earnings_quality_score {
+        if eq > 0.0 {
+            dur_bits.push(format!("financial strength audit {:.0}/100", eq));
+        }
     }
 
     let capex_ratio = avg_maintenance_capex(bundle, 3)
-        .map(|c| c / financials.operating_cashflow.max(1.0))
+        .map(|c| c / financials.operating_cashflow.unwrap_or(0.0).max(1.0))
         .unwrap_or(0.0);
     let cap_score = scores.capital_intensity_score.unwrap_or(0.0);
     let cap_bits = vec![
@@ -523,7 +521,13 @@ fn build_score_reasons(
     if let Some(r) = cfo_pat_3y.or(trust_inputs.cumulative_cfo_pat_3y) {
         trust_bits.push(format!("3Y CFO/PAT {:.2}", r));
     }
-    trust_bits.push(format!("D/E {:.2}", financials.debt_to_equity));
+    trust_bits.push(format!(
+        "D/E {}",
+        financials
+            .debt_to_equity
+            .map(|d| format!("{:.2}", d))
+            .unwrap_or_else(|| "n/a".to_string())
+    ));
     if let Some(ic) = trust_inputs.interest_coverage {
         trust_bits.push(format!("interest coverage {:.1}x", ic));
     }
@@ -752,9 +756,9 @@ pub fn build_buffett_lens(
     let earnings_picture = EarningsPicture {
         owner_earnings_ttm: owner_earnings,
         reported_pat_ttm: reported_pat,
-        free_cashflow: financials.free_cashflow,
+        free_cashflow: financials.free_cashflow.unwrap_or(0.0),
         owner_earnings_yield_pct: scores.owner_earnings_yield_pct,
-        roe_pct: financials.return_on_equity * 100.0,
+        roe_pct: financials.return_on_equity.unwrap_or(0.0) * 100.0,
         roce_pct: financials.return_on_capital_employed.map(|r| r * 100.0),
         gross_margin_pct: financials.gross_margins * 100.0,
         operating_margin_pct: financials.operating_margins * 100.0,
@@ -764,7 +768,7 @@ pub fn build_buffett_lens(
              ROE {:.1}%. Focus on economic cash power, not adjusted earnings alone.",
             owner_earnings.unwrap_or(0.0),
             reported_pat,
-            financials.return_on_equity * 100.0
+            financials.return_on_equity.unwrap_or(0.0) * 100.0
         ),
     };
 
@@ -793,8 +797,8 @@ pub fn build_buffett_lens(
 
     let capex_ratio = maint_capex
         .and_then(|c| {
-            if financials.operating_cashflow > 0.0 {
-                Some(c / financials.operating_cashflow)
+            if financials.operating_cashflow.map(|c| c > 0.0).unwrap_or(false) {
+                Some(c / financials.operating_cashflow.unwrap_or(1.0))
             } else {
                 None
             }
@@ -840,11 +844,14 @@ pub fn build_buffett_lens(
             )
         },
         narrative: format!(
-            "Management trust {:.0}/100 ({}). Officer pay efficiency {:.0}/100. \
+            "Management trust {:.0}/100 ({}). Officer pay efficiency {}. \
              Integrity is non-negotiable — confirm related-party dealings and incentives in annual report.",
             trust_score,
             trust_verdict(trust_score),
-            management.pay_vs_revenue_score
+            management
+                .pay_vs_revenue_score
+                .map(|s| format!("{:.0}/100", s))
+                .unwrap_or_else(|| "N/A".to_string())
         ),
     };
 
@@ -876,7 +883,7 @@ pub fn build_buffett_lens(
             fair_value,
             price,
             mos.unwrap_or(0.0),
-            if financials.debt_to_equity > 1.0 {
+            if financials.debt_to_equity.map(|d| d > 1.0).unwrap_or(false) {
                 "High leverage adds fragility — never risk what you need for what you do not need."
             } else {
                 "Balance sheet leverage is not extreme on this screen."
@@ -961,18 +968,18 @@ mod tests {
             revenue: 10_000.0,
             net_income: 1_200.0,
             pe_ratio: 18.0,
-            return_on_equity: 0.20,
+            return_on_equity: Some(0.20),
             return_on_capital_employed: Some(0.22),
             profit_margins: 0.12,
             gross_margins: 0.45,
             operating_margins: 0.20,
-            operating_cashflow: 1_400.0,
-            free_cashflow: 1_000.0,
-            debt_to_equity: 0.35,
+            operating_cashflow: Some(1_400.0),
+            free_cashflow: Some(1_000.0),
+            debt_to_equity: Some(0.35),
             market_cap: 20_000.0,
             trailing_eps: 10.0,
-            revenue_growth: 0.12,
-            earnings_growth: 0.15,
+            revenue_growth: Some(0.12),
+            earnings_growth: Some(0.15),
             ..Default::default()
         }
     }
@@ -985,6 +992,7 @@ mod tests {
                 operating_cashflow: 1_400.0,
                 capital_expenditure: 200.0,
                 free_cashflow: 1_200.0,
+                ..Default::default()
             })
             .collect();
         let inc: Vec<IncomeStatementRow> = (0..4)
@@ -1023,9 +1031,9 @@ mod tests {
         let mut f = base_financials();
         f.profit_margins = 0.05;
         f.gross_margins = 0.18;
-        f.return_on_equity = 0.06;
+        f.return_on_equity = Some(0.06);
         f.return_on_capital_employed = Some(0.05);
-        f.free_cashflow = -200.0;
+        f.free_cashflow = Some(-200.0);
         f.pe_ratio = 8.0;
         let b = compounder_bundle();
         let scores =
@@ -1037,7 +1045,7 @@ mod tests {
     #[test]
     fn high_debt_reduces_trust() {
         let mut f = base_financials();
-        f.debt_to_equity = 1.8;
+        f.debt_to_equity = Some(1.8);
         let inputs = ManagementTrustInputs {
             interest_coverage: Some(1.5),
             ..Default::default()

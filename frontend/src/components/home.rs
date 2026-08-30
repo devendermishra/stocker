@@ -111,6 +111,11 @@ pub fn Home(id: String, exchange: String) -> Element {
                     "Open Screener"
                 }
                 Link {
+                    to: Route::SectorsList {},
+                    style: "padding: 0.55rem 1rem; background: #fff; color: #184ad8; border: 1px solid #184ad8; border-radius: 8px; text-decoration: none; font-weight: 600;",
+                    "Sector Research"
+                }
+                Link {
                     to: Route::PortfolioList {},
                     style: "padding: 0.55rem 1rem; background: #fff; color: #184ad8; border: 1px solid #184ad8; border-radius: 8px; text-decoration: none; font-weight: 600;",
                     "Portfolio"

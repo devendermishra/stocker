@@ -9,10 +9,17 @@ pub fn management_tab(r: &ResearchReport) -> Element {
     rsx! {
         section { style: "{card}",
             h3 { style: "margin-top:0;", "Management & Qualitative Read" }
-            KeyValue { label: "Pay Efficiency Score", value: format!("{:.0}/100", r.management_analysis.pay_vs_revenue_score) }
+            KeyValue {
+                label: "Pay Efficiency Score",
+                value: r.management_analysis.pay_vs_revenue_score
+                    .map(|s| format!("{:.0}/100", s))
+                    .unwrap_or_else(|| "N/A — not used for lenders".to_string())
+            }
             KeyValue { label: "Summary Tone", value: format!("{} ({:.0}/100)", r.management_analysis.tone_label, r.management_analysis.tone_score) }
             p { style: "line-height:1.55; color:#273447;", "{r.management_analysis.narrative}" }
-            p { style: "line-height:1.55; color:#273447;", "{r.stock_analysis.margin_trend}" }
+            if let Some(mt) = &r.stock_analysis.margin_trend {
+                p { style: "line-height:1.55; color:#273447;", "{mt}" }
+            }
             if let Some(ref s) = r.company_summary {
                 h4 { "Company Summary (Yahoo)" }
                 p { style: "font-size: 0.92rem; line-height: 1.55; color: #3a4352;", "{s}" }

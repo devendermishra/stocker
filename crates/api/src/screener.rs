@@ -39,6 +39,7 @@ pub fn router(service: Arc<ScreenerService>) -> Router {
         .route("/api/v1/screener/recompute", post(recompute_composites))
         .route("/api/v1/screener/scheduler/stop", post(stop_scheduler))
         .route("/api/v1/screener/backfill", post(start_backfill))
+        .route("/api/v1/screener/backfill/sectors", post(start_sector_backfill))
         .with_state(ScreenerState { service })
 }
 
@@ -238,6 +239,23 @@ async fn start_backfill(State(s): State<ScreenerState>) -> impl IntoResponse {
         Err(ScreenerError::AlreadyRunning) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "Stock data refresh is already running" })),
+        )
+            .into_response(),
+        Err(e) => screener_error_response(e),
+    }
+}
+
+async fn start_sector_backfill(State(s): State<ScreenerState>) -> impl IntoResponse {
+    let cfg = RefreshConfig::from_env();
+    match s.service.try_start_sector_backfill(cfg) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "ok": true, "message": "sector backfill started in background" })),
+        )
+            .into_response(),
+        Err(ScreenerError::AlreadyRunning) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "A data refresh is already running" })),
         )
             .into_response(),
         Err(e) => screener_error_response(e),

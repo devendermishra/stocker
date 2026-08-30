@@ -71,7 +71,7 @@ pub fn DriveSync() -> Element {
                         st.remote_backup_files.is_empty()
                             || st.remote_backup_files.iter().any(|f| f == "portfolio.db"),
                     );
-                    recommendation.set(Some(format_recommendation(st.recommendation)));
+                    recommendation.set(Some(format_recommendation(st.recommendation.clone())));
                     status_json.set(Some(
                         serde_json::to_string_pretty(&st).unwrap_or_default(),
                     ));

@@ -26,6 +26,13 @@ pub fn fmt_money(v: f64) -> String {
     }
 }
 
+pub fn fmt_opt_money(v: Option<f64>) -> String {
+    match v {
+        Some(x) if x.is_finite() => fmt_money(x),
+        _ => "N/A".to_string(),
+    }
+}
+
 pub fn fmt_pct(v: f64) -> String {
     format!("{:.2}%", v * 100.0)
 }
@@ -38,6 +45,20 @@ pub fn fmt_opt_pct(v: Option<f64>) -> String {
 pub fn fmt_opt_num(v: Option<f64>) -> String {
     v.map(|x| format!("{:.2}", x))
         .unwrap_or_else(|| "N/A".to_string())
+}
+
+pub fn fmt_opt_ratio(v: Option<f64>) -> String {
+    match v {
+        Some(x) if x.is_finite() => fmt_pct(x),
+        _ => "N/A".to_string(),
+    }
+}
+
+pub fn fmt_opt_multiple(v: Option<f64>) -> String {
+    match v {
+        Some(x) if x.is_finite() && x > 0.0 => format!("{:.2}", x),
+        _ => "N/A".to_string(),
+    }
 }
 
 /// Format a screener snapshot value using catalog unit hints.

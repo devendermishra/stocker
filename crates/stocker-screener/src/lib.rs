@@ -14,6 +14,7 @@ pub mod query;
 pub mod recompute;
 pub mod refresh;
 pub mod screens;
+pub mod sectors;
 pub mod service;
 pub mod snapshot;
 pub mod symbols;
@@ -23,8 +24,9 @@ pub mod universe_csv;
 pub use error::{Error, Result};
 pub use metrics::{MetricCategory, MetricId, MetricSpec, SourceKind, Unit, CATALOG};
 pub use query::{fetch_snapshot, FilterOp, ScreenFilter, ScreenQuery, ScreenRow, ScreenValue, SortDir};
-pub use refresh::{BackfillStats, RefreshConfig, SchedulerStatus};
+pub use refresh::{BackfillStats, RefreshConfig, SchedulerStatus, SectorBackfillStats};
 pub use screens::{NewSavedScreen, SavedScreen};
+pub use sectors::{SectorDetail, SectorListItem, SectorMember};
 pub use coverage::{CoverageReport, CoverageSummary, CoverageTier, MetricCoverage, parent_usable};
 pub use recompute::{RecomputeStats, recompute_composites};
 pub use enrichment::{

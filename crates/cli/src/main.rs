@@ -65,6 +65,11 @@ enum Command {
         #[arg(short, long)]
         db: Option<PathBuf>,
     },
+    /// Backfill missing sector/industry labels (lightweight Yahoo profile fetch)
+    BackfillSectors {
+        #[arg(short, long)]
+        db: Option<PathBuf>,
+    },
     /// Print per-metric fill rates (full / partial / empty) across snapshots
     Coverage {
         #[arg(short, long)]
@@ -154,6 +159,11 @@ async fn main() {
         }
         Command::Backfill { db } => {
             if let Err(code) = run_backfill(db.as_deref()).await {
+                std::process::exit(code);
+            }
+        }
+        Command::BackfillSectors { db } => {
+            if let Err(code) = run_backfill_sectors(db.as_deref()).await {
                 std::process::exit(code);
             }
         }
@@ -263,6 +273,28 @@ async fn run_backfill(db: Option<&Path>) -> Result<(), i32> {
     eprintln!(
         "Backfill done: {} refreshed, {} errors.",
         stats.refreshed, stats.errors
+    );
+    Ok(())
+}
+
+async fn run_backfill_sectors(db: Option<&Path>) -> Result<(), i32> {
+    let svc = open_service(db).await?;
+    let cfg = RefreshConfig::from_env();
+    let missing = stocker_screener::refresh::symbols_missing_sector(svc.pool())
+        .await
+        .map(|v| v.len())
+        .unwrap_or(0);
+    eprintln!(
+        "Sector backfill starting (pacing {}ms, {} symbols missing a sector)…",
+        cfg.pacing_ms, missing
+    );
+    let stats = svc.backfill_sectors(&cfg).await.map_err(|e| {
+        eprintln!("Sector backfill failed: {e}");
+        1
+    })?;
+    eprintln!(
+        "Sector backfill done: {} scanned, {} filled, {} still missing, {} errors.",
+        stats.scanned, stats.filled, stats.still_missing, stats.errors
     );
     Ok(())
 }
