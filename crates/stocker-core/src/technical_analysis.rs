@@ -1,7 +1,7 @@
 //! Technical indicators from daily OHLCV (Yahoo chart). Heuristic only — not trading advice.
 
 use crate::models::{
-    ChartHistory, Financials, TechnicalAnalysis, TechnicalMomentum, TechnicalTrend,
+    ChartHistory, Financials, TechnicalAnalysis, TechnicalMomentum, TechnicalState, TechnicalTrend,
     TechnicalVolatility, TechnicalVolume,
 };
 
@@ -209,6 +209,7 @@ fn trend_label(price: f64, sma50: Option<f64>, sma200: Option<f64>) -> String {
 
 pub fn build_technical_analysis(price: f64, financials: &Financials, chart: &ChartHistory) -> TechnicalAnalysis {
     let closes = closes_from_chart(chart);
+    let chart_price = closes.last().copied().filter(|c| *c > 0.0).unwrap_or(price);
     let confidence = if closes.len() < 60 {
         "Low"
     } else if closes.len() < 200 {
@@ -223,12 +224,12 @@ pub fn build_technical_analysis(price: f64, financials: &Financials, chart: &Cha
     let sma100 = sma_last(&closes, 100);
     let sma200 = sma_last(&closes, 200);
 
-    let pv50 = match (price > 0.0, sma50) {
-        (true, Some(s)) => Some(((price / s) - 1.0) * 100.0),
+    let pv50 = match (chart_price > 0.0, sma50) {
+        (true, Some(s)) => Some(((chart_price / s) - 1.0) * 100.0),
         _ => None,
     };
-    let pv200 = match (price > 0.0, sma200) {
-        (true, Some(s)) => Some(((price / s) - 1.0) * 100.0),
+    let pv200 = match (chart_price > 0.0, sma200) {
+        (true, Some(s)) => Some(((chart_price / s) - 1.0) * 100.0),
         _ => None,
     };
 
@@ -242,7 +243,7 @@ pub fn build_technical_analysis(price: f64, financials: &Financials, chart: &Cha
         sma_200: sma200,
         price_vs_sma50_pct: pv50,
         price_vs_sma200_pct: pv200,
-        trend_label: trend_label(price, sma50, sma200),
+        trend_label: trend_label(chart_price, sma50, sma200),
     };
 
     let momentum = TechnicalMomentum {
@@ -259,13 +260,13 @@ pub fn build_technical_analysis(price: f64, financials: &Financials, chart: &Cha
 
     let hi = financials.fifty_two_week_high;
     let lo = financials.fifty_two_week_low;
-    let dist_hi = if hi > 0.0 && price > 0.0 {
-        Some(((hi - price) / hi) * 100.0)
+    let dist_hi = if hi > 0.0 && chart_price > 0.0 {
+        Some(((hi - chart_price) / hi) * 100.0)
     } else {
         None
     };
-    let dist_lo = if lo > 0.0 && price > 0.0 {
-        Some(((price - lo) / lo) * 100.0)
+    let dist_lo = if lo > 0.0 && chart_price > 0.0 {
+        Some(((chart_price - lo) / lo) * 100.0)
     } else {
         None
     };
@@ -351,12 +352,26 @@ pub fn build_technical_analysis(price: f64, financials: &Financials, chart: &Cha
         interpretation: vol_interp,
     };
 
+    let state = TechnicalState {
+        above_dma50: sma50.map(|s| chart_price > s),
+        above_dma200: sma200.map(|s| chart_price > s),
+        rsi_oversold: rsi.map(|r| r < 30.0),
+        rsi_weak: rsi.map(|r| r < 40.0),
+        rsi_below_35: rsi.map(|r| r < 35.0),
+        macd_bullish: match (macd, macd_sig) {
+            (Some(m), Some(s)) => Some(m > s),
+            _ => None,
+        },
+        price_stretched_vs_50: pv50.map(|p| p > 8.0),
+    };
+
     TechnicalAnalysis {
         trend,
         momentum,
         volatility,
         volume,
         confidence,
+        state,
     }
 }
 
@@ -390,5 +405,47 @@ mod tests {
         let c = linear_closes(40, 10.0, 0.2);
         let r = roc_pct(&c, 21).unwrap();
         assert!(r > 0.0);
+    }
+
+    #[test]
+    fn recovery_setup_is_not_oversold() {
+        let mut bars = Vec::new();
+        for i in 0..150 {
+            bars.push(crate::models::ChartBar {
+                ts: i,
+                open: 1500.0,
+                high: 1510.0,
+                low: 1490.0,
+                close: 1500.0,
+                volume: 1_000.0,
+            });
+        }
+        for i in 150..199 {
+            bars.push(crate::models::ChartBar {
+                ts: i,
+                open: 1280.0,
+                high: 1290.0,
+                low: 1270.0,
+                close: 1280.0,
+                volume: 1_000.0,
+            });
+        }
+        bars.push(crate::models::ChartBar {
+            ts: 199,
+            open: 1316.0,
+            high: 1320.0,
+            low: 1310.0,
+            close: 1316.0,
+            volume: 1_000.0,
+        });
+        let chart = crate::models::ChartHistory { bars };
+        let t = build_technical_analysis(1400.0, &Financials::default(), &chart);
+        assert_eq!(t.state.above_dma50, Some(true));
+        assert_eq!(t.state.above_dma200, Some(false));
+        assert_eq!(t.state.rsi_oversold, Some(false));
+        assert_eq!(t.state.rsi_below_35, Some(false));
+        let rsi = t.momentum.rsi_14.unwrap();
+        assert!(rsi >= 35.0, "expected RSI >= 35, got {rsi}");
+        assert!(!t.momentum.rsi_label.to_lowercase().contains("oversold"));
     }
 }

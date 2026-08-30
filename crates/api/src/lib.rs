@@ -1,6 +1,7 @@
 mod handlers;
 mod portfolio;
 mod screener;
+mod sectors;
 
 use std::sync::Arc;
 
@@ -34,7 +35,9 @@ pub fn router(
         .with_state(state);
 
     if let Some(svc) = screener {
-        router = router.merge(screener::router(svc));
+        router = router
+            .merge(screener::router(svc.clone()))
+            .merge(sectors::router(svc));
     }
 
     if let Some(svc) = portfolio {

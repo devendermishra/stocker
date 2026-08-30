@@ -85,9 +85,11 @@ Artifact: `target/release/stocker-web` (Windows: `stocker-web.exe`).
 
 | Route | Action |
 |-------|--------|
-| `/` (Home) | Enter a symbol → **Generate Report**, or click **Open Screener** |
+| `/` (Home) | Enter a symbol → **Generate Report**, or click **Open Screener** / **Sector Research** |
 | `/report/:symbol` | 9-tab research report (Overview, Research, Financials, **Detailed Data**, Sector, Peers, News, Management, Framework) |
 | `/screener` | Filter builder, results table, saved screens, coverage tab, **Refresh stock data** (universe backfill) |
+| `/sectors` | Sector research catalog — all Yahoo sectors in the screener universe |
+| `/sectors/:sector` | Sector detail: lifecycle, type, demand–supply, competition, profitability, growth, pricing power, Porter Five Forces, constituents |
 
 ### Desktop screener database
 
@@ -161,6 +163,9 @@ cargo run -p stocker-cli -- status
 
 # Foreground backfill (all symbols)
 cargo run -p stocker-cli -- backfill
+
+# Backfill only missing sector/industry labels (lightweight Yahoo profile fetch)
+cargo run -p stocker-cli -- backfill-sectors
 ```
 
 Example `query.json`:
@@ -191,8 +196,11 @@ When `stocker-api` is running with a valid `stocker.db`:
 | `GET` | `/api/v1/screener/snapshot/{symbol}` | Full snapshot for one symbol |
 | `POST` | `/api/v1/screener/refresh/{symbol}` | Force-refresh one symbol |
 | `POST` | `/api/v1/screener/backfill` | Start universe backfill in background (409 if already running) |
+| `POST` | `/api/v1/screener/backfill/sectors` | Backfill missing sector/industry labels only (409 if already running) |
 | `POST` | `/api/v1/screener/recompute` | Recompute composite metrics |
 | `POST` | `/api/v1/screener/scheduler/stop` | Stop refresh scheduler |
+| `GET` | `/api/v1/sectors` | Sector catalog summaries |
+| `GET` | `/api/v1/sectors/{sector}` | Full sector research profile + members |
 
 Research API (same server): `GET /api/v1/symbols/{symbol}/report`, `GET /health`.
 

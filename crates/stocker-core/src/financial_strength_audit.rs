@@ -1,9 +1,10 @@
 use crate::math::{cagr, pct_change};
 use crate::models::{
     ActionGuidance, AssetProfile, AuditChecklistItem, AuditStatus, BalanceSheetRow, BankingMetrics,
-    CashflowRow, FinancialStrengthAudit, Financials, IncomeStatementRow, MarketSignals,
-    ResearchRating, ScreenerMetricSnapshot, StatementBundle, ValuationAnalysis,
+    CashflowRow, DataCoverage, FinancialCompanyType, FinancialStrengthAudit, Financials, IncomeStatementRow,
+    MarketSignals, ResearchRating, ScreenerMetricSnapshot, StatementBundle, ValuationAnalysis,
 };
+use crate::financial_company::{NA_FILING, NA_NOT_USED};
 use crate::statements::sort_owned_desc;
 
 pub fn cumulative_cfo_pat_for_bundle(bundle: &StatementBundle, years: usize) -> Option<f64> {
@@ -70,7 +71,7 @@ fn status_from_coverage(v: Option<f64>) -> AuditStatus {
     }
 }
 
-fn score_from_checklist(items: &[AuditChecklistItem]) -> f64 {
+fn score_from_checklist_opt(items: &[AuditChecklistItem]) -> Option<f64> {
     let scored: Vec<f64> = items
         .iter()
         .filter(|i| i.status != AuditStatus::InsufficientData)
@@ -82,9 +83,9 @@ fn score_from_checklist(items: &[AuditChecklistItem]) -> f64 {
         })
         .collect();
     if scored.is_empty() {
-        50.0
+        None
     } else {
-        scored.iter().sum::<f64>() / scored.len() as f64
+        Some(scored.iter().sum::<f64>() / scored.len() as f64)
     }
 }
 
@@ -98,14 +99,8 @@ fn is_asset_light(profile: &AssetProfile) -> bool {
         || industry.contains("it services")
 }
 
-fn is_bank(profile: &AssetProfile) -> bool {
-    let sector = profile.sector.as_deref().unwrap_or("").to_lowercase();
-    let industry = profile.industry.as_deref().unwrap_or("").to_lowercase();
-    sector.contains("financial")
-        || industry.contains("bank")
-        || industry.contains("banks")
-        || industry.contains("nbfc")
-        || industry.contains("financial services")
+fn score_from_checklist(items: &[AuditChecklistItem]) -> f64 {
+    score_from_checklist_opt(items).unwrap_or(50.0)
 }
 
 fn status_from_pct_le(v: Option<f64>, pass: f64, watch: f64) -> AuditStatus {
@@ -264,6 +259,13 @@ fn audit_growth_checks(
     _profile: &AssetProfile,
     screener: Option<&ScreenerMetricSnapshot>,
 ) {
+    let rec_dso = bal.first().zip(inc.first()).and_then(|(b, i)| {
+        if i.revenue > 0.0 && b.net_receivables > 0.0 {
+            Some((b.net_receivables / i.revenue) * 365.0)
+        } else {
+            screener.and_then(|s| s.days_receivable_outstanding)
+        }
+    });
     let rec_rev_flag = if let (Some(cur), Some(prev)) = (inc.get(0), inc.get(1)) {
         let rg = pct_change(cur.revenue, prev.revenue);
         let ag = bal
@@ -272,8 +274,12 @@ fn audit_growth_checks(
             .and_then(|(b0, b1)| pct_change(b0.net_receivables, b1.net_receivables));
         match (rg, ag) {
             (Some(r), Some(a)) if a > r + 10.0 => {
-                acc.red_flags.push("Receivables growing faster than revenue — collection risk.".to_string());
-                Some((a - r, AuditStatus::Fail))
+                if rec_dso.map(|d| d < 30.0).unwrap_or(false) {
+                    Some((a - r, AuditStatus::Watch))
+                } else {
+                    acc.red_flags.push("Receivables growing faster than revenue — collection risk.".to_string());
+                    Some((a - r, AuditStatus::Fail))
+                }
             }
             (Some(r), Some(a)) if a > r + 5.0 => Some((a - r, AuditStatus::Watch)),
             (Some(_), Some(_)) => Some((0.0, AuditStatus::Pass)),
@@ -290,7 +296,10 @@ fn audit_growth_checks(
             .unwrap_or_else(|| "N/A".to_string()),
         benchmark: "Receivables ≤ revenue growth".to_string(),
         status: rec_rev_flag.map(|(_, s)| s).unwrap_or(AuditStatus::InsufficientData),
-        note: "Loose credit terms can inflate top-line without cash.".to_string(),
+        note: rec_dso
+            .map(|d| format!("Receivables growth warrants monitoring, but absolute DSO remains modest at ~{:.0} days.", d))
+            .filter(|_| rec_dso.map(|d| d < 30.0).unwrap_or(false))
+            .unwrap_or_else(|| "Loose credit terms can inflate top-line without cash.".to_string()),
     });
 
     let inv_rev_flag = if let (Some(cur), Some(prev)) = (inc.get(0), inc.get(1)) {
@@ -337,7 +346,7 @@ fn audit_growth_checks(
         }
     });
     let rec_trend = match (rec_days, rec_days_old) {
-        (Some(n), Some(o)) if n > o + 15.0 => AuditStatus::Fail,
+        (Some(n), Some(o)) if n > o + 15.0 && n >= 30.0 => AuditStatus::Fail,
         (Some(n), Some(o)) if n > o + 5.0 => AuditStatus::Watch,
         (Some(_), Some(_)) => AuditStatus::Pass,
         (Some(_), None) => AuditStatus::Watch,
@@ -398,24 +407,30 @@ fn audit_balance_sheet_checks(
     let equity = b0.map(|b| b.total_equity).unwrap_or(0.0);
     let debt = b0.map(|b| b.total_debt).unwrap_or(financials.total_debt);
     let d_eq = if equity.abs() > 1.0 {
-        debt / equity
+        Some(debt / equity)
     } else {
         screener
             .and_then(|s| s.debt_to_equity)
-            .unwrap_or(financials.debt_to_equity)
+            .or(financials.debt_to_equity)
     };
     let de_healthy = if is_asset_light(profile) { 0.3 } else { 0.5 };
     let de_warn = if is_asset_light(profile) { 0.8 } else { 1.0 };
-    let de_status = status_from_ratio_le(Some(d_eq), de_healthy, de_warn);
+    let de_status = status_from_ratio_le(d_eq, de_healthy, de_warn);
     if de_status == AuditStatus::Fail {
-        acc.red_flags.push(format!("Debt/equity {:.2} is elevated — solvency risk.", d_eq));
+        acc.red_flags.push(format!(
+            "Debt/equity {:.2} is elevated — solvency risk.",
+            d_eq.unwrap_or(0.0)
+        ));
     } else if de_status == AuditStatus::Pass {
-        acc.strengths.push(format!("Debt/equity {:.2} is within conservative range.", d_eq));
+        acc.strengths.push(format!(
+            "Debt/equity {:.2} is within conservative range.",
+            d_eq.unwrap_or(0.0)
+        ));
     }
     acc.checklist.push(AuditChecklistItem {
         metric: "Debt / equity".to_string(),
-        value: Some(d_eq),
-        value_display: format!("{:.2}", d_eq),
+        value: d_eq,
+        value_display: d_eq.map(|x| format!("{:.2}", x)).unwrap_or_else(|| "N/A".to_string()),
         benchmark: if is_asset_light(profile) {
             "< 0.3 (asset-light)".to_string()
         } else {
@@ -425,7 +440,12 @@ fn audit_balance_sheet_checks(
         note: "Leverage amplifies downturn risk.".to_string(),
     });
 
-    let interest = b0.map(|b| b.interest_expense).unwrap_or(0.0);
+    let interest = inc
+        .first()
+        .map(|r| r.interest_expense)
+        .filter(|i| *i > 1e-6)
+        .or_else(|| b0.map(|b| b.interest_expense).filter(|i| *i > 1e-6))
+        .unwrap_or(0.0);
     let ebit = inc.first().map(|r| {
         if r.operating_income.abs() > 1.0 {
             r.operating_income
@@ -456,9 +476,23 @@ fn audit_balance_sheet_checks(
         note: "EBIT must comfortably cover interest expense.".to_string(),
     });
 
+    let local_roce = {
+        let ebit = inc.first().map(|r| {
+            if r.operating_income.abs() > 1.0 {
+                r.operating_income
+            } else {
+                r.ebit.max(r.ebitda)
+            }
+        });
+        match (ebit, b0) {
+            (Some(e), Some(b)) => crate::yahoo_metrics::local_roce(e, b.total_equity, b.total_debt, b.cash),
+            _ => None,
+        }
+    };
     let roce = screener
         .and_then(|s| s.return_on_capital_employed)
         .or(financials.return_on_capital_employed)
+        .or(local_roce)
         .map(|x| x * 100.0);
     let roce_status = match roce {
         Some(x) if x >= 18.0 => AuditStatus::Pass,
@@ -604,12 +638,28 @@ pub fn build_financial_strength_audit(
     screener: Option<&ScreenerMetricSnapshot>,
     bank: Option<&BankingMetrics>,
 ) -> FinancialStrengthAudit {
-    if is_bank(profile) {
-        return build_bank_financial_strength_audit(profile, screener, bank);
-    }
+    build_financial_strength_audit_for(
+        bundle,
+        financials,
+        profile,
+        screener,
+        bank,
+        FinancialCompanyType::Industrial,
+        DataCoverage::default(),
+    )
+}
 
-if is_bank(profile) {
-        return build_bank_financial_strength_audit(profile, screener, bank);
+pub fn build_financial_strength_audit_for(
+    bundle: &StatementBundle,
+    financials: &Financials,
+    profile: &AssetProfile,
+    screener: Option<&ScreenerMetricSnapshot>,
+    bank: Option<&BankingMetrics>,
+    company_type: FinancialCompanyType,
+    coverage: DataCoverage,
+) -> FinancialStrengthAudit {
+    if company_type.is_lender() {
+        return build_lender_financial_strength_audit(profile, screener, bank, company_type, coverage);
     }
 
     let mut inc = bundle.income_annual.clone();
@@ -691,158 +741,241 @@ if is_bank(profile) {
     };
 
     FinancialStrengthAudit {
-        earnings_quality_score,
-        balance_sheet_score,
-        overall_strength_score,
+        earnings_quality_score: Some(earnings_quality_score),
+        balance_sheet_score: Some(balance_sheet_score),
+        overall_strength_score: Some(overall_strength_score),
         checklist: acc.checklist,
         red_flags: acc.red_flags,
         strengths: acc.strengths,
         interpretation,
         confidence,
+        scores_provisional: false,
+        financial_quality_display: format!("{:.0}", overall_strength_score),
+        data_coverage: coverage,
+        quality_weights_note: String::new(),
     }
 }
 
-fn build_bank_financial_strength_audit(
+fn filing_item(metric: &str, value: Option<f64>, display: String, benchmark: &str, status: AuditStatus, note: &str) -> AuditChecklistItem {
+    AuditChecklistItem {
+        metric: metric.to_string(),
+        value,
+        value_display: if value.is_some() { display } else { NA_FILING.to_string() },
+        benchmark: benchmark.to_string(),
+        status,
+        note: note.to_string(),
+    }
+}
+
+fn build_lender_financial_strength_audit(
     profile: &AssetProfile,
-    screener: Option<&ScreenerMetricSnapshot>,
+    _screener: Option<&ScreenerMetricSnapshot>,
     bank: Option<&BankingMetrics>,
+    company_type: FinancialCompanyType,
+    coverage: DataCoverage,
 ) -> FinancialStrengthAudit {
     let mut checklist = Vec::new();
     let mut red_flags = Vec::new();
     let mut strengths = Vec::new();
+    let b = bank.cloned().unwrap_or_default();
+    let is_bank = company_type.is_bank();
 
-    let conf = if bank.is_some() {
-        "Medium"
-    } else {
-        "Low"
-    }
-    .to_string();
-
-    let (gnpa, nnpa, pcr, credit_g, deposit_g, casa) = bank
-        .map(|b| {
-            (
-                b.gnpa_pct,
-                b.nnpa_pct,
-                b.provision_coverage_ratio_pct,
-                b.credit_growth_yoy_pct,
-                b.deposit_growth_yoy_pct,
-                b.casa_ratio_pct,
-            )
-        })
-        .unwrap_or((None, None, None, None, None, None));
-
-    let gnpa_status = status_from_pct_le(gnpa, 3.0, 6.0);
+    let gnpa_status = status_from_pct_le(b.gnpa_pct, 3.0, 6.0);
     if gnpa_status == AuditStatus::Fail {
-        red_flags.push("High GNPA% — asset quality stress; review slippages and recoveries.".to_string());
+        red_flags.push("High GNPA / Stage 3 — asset quality stress.".to_string());
     } else if gnpa_status == AuditStatus::Pass {
-        strengths.push("Low GNPA% — healthier asset quality.".to_string());
+        strengths.push("Low GNPA / Stage 3 — healthier asset quality.".to_string());
     }
-    checklist.push(AuditChecklistItem {
-        metric: "GNPA %".to_string(),
-        value: gnpa,
-        value_display: fmt_pct(gnpa),
-        benchmark: "< 3% preferred".to_string(),
-        status: gnpa_status,
-        note: "Gross non-performing assets as % of advances.".to_string(),
-    });
-
-    let nnpa_status = status_from_pct_le(nnpa, 1.0, 3.0);
-    if nnpa_status == AuditStatus::Fail {
-        red_flags.push("High NNPA% — provisioning may be inadequate; review PCR and write-offs.".to_string());
-    }
-    checklist.push(AuditChecklistItem {
-        metric: "NNPA %".to_string(),
-        value: nnpa,
-        value_display: fmt_pct(nnpa),
-        benchmark: "< 1% preferred".to_string(),
-        status: nnpa_status,
-        note: "Net non-performing assets after provisions.".to_string(),
-    });
-
-    let pcr_status = status_from_pct_ge(pcr, 70.0, 50.0);
+    checklist.push(filing_item(
+        "Gross Stage 3 / GNPA",
+        b.gnpa_pct,
+        fmt_pct(b.gnpa_pct),
+        "< 3% preferred",
+        gnpa_status,
+        "Core asset-quality metric for lenders.",
+    ));
+    checklist.push(filing_item(
+        "Net Stage 3 / NNPA",
+        b.nnpa_pct,
+        fmt_pct(b.nnpa_pct),
+        "< 1% preferred",
+        status_from_pct_le(b.nnpa_pct, 1.0, 3.0),
+        "Net NPA after provisions.",
+    ));
+    let pcr_status = status_from_pct_ge(b.provision_coverage_ratio_pct, 70.0, 50.0);
     if pcr_status == AuditStatus::Fail {
-        red_flags.push("Low provision coverage ratio — downturn could hit profits/capital.".to_string());
+        red_flags.push("Low provision coverage ratio.".to_string());
     } else if pcr_status == AuditStatus::Pass {
-        strengths.push("Provision coverage ratio is comfortable.".to_string());
+        strengths.push("Provision coverage is comfortable.".to_string());
     }
-    checklist.push(AuditChecklistItem {
-        metric: "Provision coverage ratio (PCR)".to_string(),
-        value: pcr,
-        value_display: fmt_pct(pcr),
-        benchmark: "> 70% preferred".to_string(),
-        status: pcr_status,
-        note: "Higher PCR provides cushion against future NPAs.".to_string(),
-    });
+    checklist.push(filing_item(
+        "Provision coverage ratio",
+        b.provision_coverage_ratio_pct,
+        fmt_pct(b.provision_coverage_ratio_pct),
+        "> 70% preferred",
+        pcr_status,
+        "Cushion against future slippages.",
+    ));
+    for (m, v, bench, note) in [
+        ("Credit cost", b.credit_cost_pct, "Lower/stable preferred", "Credit cost as % of loans."),
+        ("Slippages", b.slippages_pct, "Trend vs GNPA", "Fresh NPA formation."),
+        ("SMA-1", b.sma1_pct, "Watch early stress", "Special mention accounts 1."),
+        ("SMA-2", b.sma2_pct, "Watch early stress", "Special mention accounts 2."),
+        ("Restructured book", b.restructured_pct, "Low preferred", "Restructured exposure."),
+        ("Stage-2 assets", b.stage2_pct, "Trend", "IFRS/Ind-AS Stage 2."),
+    ] {
+        checklist.push(filing_item(m, v, fmt_pct(v), bench, if v.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData }, note));
+    }
+    checklist.push(filing_item(
+        "Recoveries",
+        b.recoveries,
+        b.recoveries.map(|x| format!("{:.0}", x)).unwrap_or_default(),
+        "Positive",
+        if b.recoveries.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData },
+        "Cash recoveries from NPAs.",
+    ));
+    checklist.push(filing_item(
+        "Write-offs",
+        b.write_offs,
+        b.write_offs.map(|x| format!("{:.0}", x)).unwrap_or_default(),
+        "Contextual",
+        if b.write_offs.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData },
+        "Write-offs can mask headline GNPA.",
+    ));
 
-    checklist.push(AuditChecklistItem {
-        metric: "Credit growth (YoY)".to_string(),
-        value: credit_g,
-        value_display: fmt_pct(credit_g),
-        benchmark: "Stable vs system".to_string(),
-        status: if credit_g.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData },
-        note: "Loan growth should be balanced with asset quality.".to_string(),
-    });
-    checklist.push(AuditChecklistItem {
-        metric: "Deposit growth (YoY)".to_string(),
-        value: deposit_g,
-        value_display: fmt_pct(deposit_g),
-        benchmark: "≥ credit growth".to_string(),
-        status: if let (Some(d), Some(c)) = (deposit_g, credit_g) {
-            if d + 1.0 >= c { AuditStatus::Pass } else { AuditStatus::Watch }
-        } else if deposit_g.is_some() {
-            AuditStatus::Watch
+    checklist.push(filing_item(
+        "CRAR",
+        b.crar_pct,
+        fmt_pct(b.crar_pct),
+        if is_bank {
+            "RBI minimum + management buffer; compare against bank peers and own history"
         } else {
-            AuditStatus::InsufficientData
+            "> 15% typical comfort for NBFCs"
         },
-        note: "Funding growth should keep up to avoid liquidity stress.".to_string(),
-    });
-    checklist.push(AuditChecklistItem {
-        metric: "CASA ratio".to_string(),
-        value: casa,
-        value_display: fmt_pct(casa),
-        benchmark: "Higher is better".to_string(),
-        status: if casa.map(|x| x >= 35.0).unwrap_or(false) {
-            AuditStatus::Pass
-        } else if casa.is_some() {
-            AuditStatus::Watch
+        status_from_pct_ge(b.crar_pct, if is_bank { 12.5 } else { 15.0 }, if is_bank { 11.5 } else { 12.0 }),
+        if is_bank {
+            "Capital adequacy vs RBI Basel / D-SIB rules, not an NBFC comfort band."
         } else {
-            AuditStatus::InsufficientData
+            "Capital adequacy vs RBI/NHB requirement."
         },
-        note: "Low-cost deposit mix improves margins and resilience.".to_string(),
-    });
+    ));
+    checklist.push(filing_item(
+        "Tier-I",
+        b.tier1_pct,
+        fmt_pct(b.tier1_pct),
+        "> 12% preferred",
+        status_from_pct_ge(b.tier1_pct, 12.0, 9.0),
+        "Core capital.",
+    ));
+    checklist.push(filing_item(
+        "NIM",
+        b.nim_pct,
+        fmt_pct(b.nim_pct),
+        "Stable/expanding",
+        if b.nim_pct.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData },
+        "Net interest margin — primary operating metric.",
+    ));
+    checklist.push(filing_item(
+        "Spread",
+        b.spread_pct,
+        fmt_pct(b.spread_pct),
+        "Stable",
+        if b.spread_pct.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData },
+        "Yield minus cost of funds.",
+    ));
+    let loan_g = b.loan_book_growth_yoy_pct.or(b.credit_growth_yoy_pct);
+    checklist.push(filing_item(
+        "Loan book growth (YoY)",
+        loan_g,
+        fmt_pct(loan_g),
+        "Balanced vs asset quality",
+        if loan_g.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData },
+        "Balance-sheet growth, not industrial revenue.",
+    ));
 
-    // Use screener interest coverage / ROCE only as weak proxies; keep them Watch-level.
-    let ic = screener.and_then(|s| s.interest_coverage_ratio);
-    checklist.push(AuditChecklistItem {
-        metric: "Interest coverage (proxy)".to_string(),
-        value: ic,
-        value_display: fmt_ratio(ic),
-        benchmark: "Contextual".to_string(),
-        status: if ic.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData },
-        note: "Not a primary bank metric; prefer NIM/NNPA/PCR and capital adequacy in filings.".to_string(),
-    });
+    if is_bank {
+        checklist.push(filing_item(
+            "Deposit growth (YoY)",
+            b.deposit_growth_yoy_pct,
+            fmt_pct(b.deposit_growth_yoy_pct),
+            "≥ credit growth",
+            if b.deposit_growth_yoy_pct.is_some() { AuditStatus::Watch } else { AuditStatus::InsufficientData },
+            "Funding franchise for banks.",
+        ));
+        checklist.push(filing_item(
+            "CASA ratio",
+            b.casa_ratio_pct,
+            fmt_pct(b.casa_ratio_pct),
+            "Higher is better",
+            if b.casa_ratio_pct.map(|x| x >= 35.0).unwrap_or(false) {
+                AuditStatus::Pass
+            } else if b.casa_ratio_pct.is_some() {
+                AuditStatus::Watch
+            } else {
+                AuditStatus::InsufficientData
+            },
+            "Low-cost deposits — bank-only.",
+        ));
+    } else {
+        checklist.push(AuditChecklistItem {
+            metric: "CASA / deposits".to_string(),
+            value: None,
+            value_display: NA_NOT_USED.to_string(),
+            benchmark: "Not applicable to NBFCs".to_string(),
+            status: AuditStatus::InsufficientData,
+            note: "NBFCs fund via bonds/bank lines, not CASA.".to_string(),
+        });
+    }
 
-    // Scores: emphasize asset quality + provisioning.
-    let asset_items: Vec<_> = checklist
-        .iter()
-        .filter(|i| i.metric.contains("NPA") || i.metric.contains("PCR"))
-        .cloned()
-        .collect();
-    let funding_items: Vec<_> = checklist
-        .iter()
-        .filter(|i| i.metric.contains("Deposit") || i.metric.contains("CASA"))
-        .cloned()
-        .collect();
-
-    let earnings_quality_score = score_from_checklist(&asset_items);
-    let balance_sheet_score = score_from_checklist(&funding_items);
-    let overall_strength_score = earnings_quality_score * 0.70 + balance_sheet_score * 0.30;
-
-    let interpretation = format!(
-        "Banking-mode audit for {} / {}. Focuses on asset quality (GNPA/NNPA) and provisioning (PCR). For a complete bank view, verify capital adequacy (CAR), NIM, slippages, and SMA buckets in the annual report.",
-        profile.sector.as_deref().unwrap_or("Financials"),
-        profile.industry.as_deref().unwrap_or("Banking")
+    let aq = score_from_checklist_opt(
+        &checklist
+            .iter()
+            .filter(|i| {
+                i.metric.contains("GNPA")
+                    || i.metric.contains("NNPA")
+                    || i.metric.contains("Stage")
+                    || i.metric.contains("PCR")
+                    || i.metric.contains("coverage")
+            })
+            .cloned()
+            .collect::<Vec<_>>(),
     );
+    let cap = score_from_checklist_opt(
+        &checklist
+            .iter()
+            .filter(|i| i.metric.contains("CRAR") || i.metric.contains("Tier"))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+
+    let scores_provisional = coverage.recommendation_gated || aq.is_none();
+    let earnings_quality_score = if scores_provisional { None } else { aq };
+    let balance_sheet_score = if scores_provisional { None } else { cap };
+    let overall_strength_score = if scores_provisional {
+        None
+    } else {
+        match (aq, cap) {
+            (Some(a), Some(c)) => Some(a * 0.62 + c * 0.38),
+            (Some(a), None) => Some(a),
+            (None, Some(c)) => Some(c),
+            _ => None,
+        }
+    };
+
+    let mode = if is_bank { "Bank" } else { "NBFC" };
+    let interpretation = if coverage.recommendation_gated {
+        format!(
+            "{mode}-mode audit for {} / {}. Asset quality, CRAR and NIM are not in Yahoo (coverage {:.0}%; critical {:.0}%). Financial quality score is N/A — missing data is not mediocre asset quality. Do not treat industrial D/E or CFO/PAT as lender weakness.",
+            profile.sector.as_deref().unwrap_or("Financials"),
+            profile.industry.as_deref().unwrap_or("Credit"),
+            coverage.overall_pct,
+            coverage.critical_pct
+        )
+    } else {
+        format!(
+            "{mode}-mode audit. Asset quality and capital use filing metrics. Industrial EBITDA/ROCE/CFO-PAT are disabled."
+        )
+    };
 
     FinancialStrengthAudit {
         earnings_quality_score,
@@ -852,7 +985,21 @@ fn build_bank_financial_strength_audit(
         red_flags,
         strengths,
         interpretation,
-        confidence: conf,
+        confidence: coverage.confidence.clone(),
+        scores_provisional,
+        financial_quality_display: if scores_provisional {
+            "N/A".to_string()
+        } else {
+            overall_strength_score
+                .map(|s| format!("{:.0}", s))
+                .unwrap_or_else(|| "N/A".to_string())
+        },
+        data_coverage: coverage,
+        quality_weights_note: if is_bank {
+            "Bank weights: asset quality, CASA, NIM, credit/deposit growth, PCR, capital, ROA/ROE.".to_string()
+        } else {
+            "NBFC weights: asset quality 25, capital 15, profitability 15, NIM 10, growth 10, funding/ALM 10, governance 5, valuation 10.".to_string()
+        },
     }
 }
 
@@ -863,23 +1010,36 @@ struct AuditRiskFlags {
 }
 
 fn audit_risk_flags(audit: &FinancialStrengthAudit) -> AuditRiskFlags {
-    let banking_mode = audit.checklist.iter().any(|i| i.metric == "GNPA %");
-    let eq_fail = if banking_mode {
+    if audit.scores_provisional || audit.data_coverage.recommendation_gated {
+        return AuditRiskFlags {
+            eq_fail: false,
+            bs_fail: false,
+            wc_drain: false,
+        };
+    }
+    let lender_mode = audit.checklist.iter().any(|i| i.metric.contains("GNPA") || i.metric.contains("Stage 3"));
+    let eq_fail = if lender_mode {
         audit.checklist.iter().any(|i| {
-            (i.metric == "GNPA %" || i.metric == "NNPA %" || i.metric.contains("PCR"))
+            (i.metric.contains("GNPA") || i.metric.contains("NNPA") || i.metric.contains("coverage ratio"))
                 && i.status == AuditStatus::Fail
         })
     } else {
-        audit.earnings_quality_score < 45.0
+        audit.earnings_quality_score.map(|s| s < 45.0).unwrap_or(false)
             || audit.checklist.iter().any(|i| {
                 i.metric.contains("Cumulative CFO / PAT (3Y)") && i.status == AuditStatus::Fail
             })
     };
-    let bs_fail = audit.balance_sheet_score < 45.0
-        || audit.checklist.iter().any(|i| {
-            (i.metric == "Debt / equity" || i.metric == "Interest coverage")
-                && i.status == AuditStatus::Fail
-        });
+    let bs_fail = if lender_mode {
+        audit.checklist.iter().any(|i| {
+            (i.metric.contains("CRAR") || i.metric.contains("Tier")) && i.status == AuditStatus::Fail
+        })
+    } else {
+        audit.balance_sheet_score.map(|s| s < 45.0).unwrap_or(false)
+            || audit.checklist.iter().any(|i| {
+                (i.metric == "Debt / equity" || i.metric == "Interest coverage")
+                    && i.status == AuditStatus::Fail
+            })
+    };
     let wc_drain = audit
         .red_flags
         .iter()
@@ -945,8 +1105,8 @@ fn guidance_from_audit_status(
 
 fn guidance_from_valuation(
     risks: &AuditRiskFlags,
-    strong: bool,
-    cheap: bool,
+    _strong: bool,
+    _cheap: bool,
     expensive: bool,
     rating: &ResearchRating,
     rationale: &mut Vec<String>,
@@ -956,18 +1116,24 @@ fn guidance_from_valuation(
         ("Sell".to_string(), "Avoid".to_string())
     } else if risks.eq_fail || risks.bs_fail {
         ("Trim".to_string(), "Avoid".to_string())
-    } else if strong && cheap && rating.overall_score >= 65.0 {
-        rationale.push("Strong financial audit with supportive valuation.".to_string());
+    } else if rating.rating_label.to_lowercase().contains("buy")
+        && rating.overall_score.is_some_and(|s| s >= 70.0)
+        && !rating.technical_rating.to_lowercase().contains("weak")
+        && !expensive
+        && !risks.eq_fail
+    {
+        rationale.push("Rating supports accumulation; technical trend is not weak.".to_string());
         ("Hold".to_string(), "Buy".to_string())
-    } else if strong && expensive {
-        rationale.push("Quality business but valuation is rich.".to_string());
+    } else if rating.overall_score.is_some_and(|s| s >= 60.0) {
+        rationale.push("Watchlist band: do not treat as a fresh full Buy.".to_string());
+        ("Hold".to_string(), "Watch / stagger only".to_string())
+    } else if rating.overall_score.is_some_and(|s| s >= 50.0)
+        || expensive
+        || rating.rating_label.contains("Avoid")
+    {
         ("Hold".to_string(), "Wait".to_string())
-    } else if rating.rating_label.contains("Avoid") || expensive {
-        ("Hold".to_string(), "Wait".to_string())
-    } else if rating.rating_label.contains("Buy") && !risks.eq_fail {
-        ("Hold".to_string(), "Buy".to_string())
     } else {
-        ("Hold".to_string(), "Wait".to_string())
+        ("Hold".to_string(), "Avoid".to_string())
     }
 }
 
@@ -976,6 +1142,7 @@ pub fn build_action_guidance(
     rating: &ResearchRating,
     valuation: &ValuationAnalysis,
     market: &MarketSignals,
+    company_type: FinancialCompanyType,
 ) -> ActionGuidance {
     let risks = audit_risk_flags(audit);
     let expensive = valuation.valuation_label.contains("Expensive")
@@ -983,28 +1150,69 @@ pub fn build_action_guidance(
     let cheap = valuation.valuation_label == "Cheap"
         || valuation.valuation_label == "Very Cheap"
         || valuation.valuation_label == "Fairly Valued";
-    let strong = audit.overall_strength_score >= 65.0 && rating.quality_score >= 55.0;
+    let strong = audit.overall_strength_score.is_some_and(|s| s >= 65.0)
+        && rating.financial_quality_score.is_some_and(|s| s >= 55.0);
 
     let (mut wait_for_events, mut rationale) =
         guidance_from_audit_status(audit, risks.eq_fail, expensive, market);
-    let (if_holding, if_considering_entry) = guidance_from_valuation(
-        &risks,
-        strong,
-        cheap,
-        expensive,
-        rating,
-        &mut rationale,
-    );
+    let (if_holding, if_considering_entry) = if audit.data_coverage.recommendation_gated {
+        if company_type.is_bank() {
+            rationale.push(
+                "Critical bank metrics (asset quality, capital, NIM, CASA, deposit/credit growth) are insufficient in Yahoo.".to_string(),
+            );
+            wait_for_events.push(
+                "Annual report / investor presentation: GNPA, NNPA, PCR, CET1/CRAR, NIM, CASA, deposit growth, credit growth, LDR.".to_string(),
+            );
+        } else {
+            rationale.push(
+                "Critical lender metrics (asset quality, capital, NIM, loan growth) are insufficient in Yahoo.".to_string(),
+            );
+            wait_for_events.push("Annual report / investor presentation: GNPA, NNPA, PCR, CRAR, NIM, loan book.".to_string());
+        }
+        (
+            "Hold pending filing verification".to_string(),
+            "Incomplete — verify filings".to_string(),
+        )
+    } else {
+        guidance_from_valuation(
+            &risks,
+            strong,
+            cheap,
+            expensive,
+            rating,
+            &mut rationale,
+        )
+    };
 
     if wait_for_events.is_empty() {
         wait_for_events.push("Verify next quarterly results against this audit checklist.".to_string());
     }
     wait_for_events.truncate(5);
 
-    let headline = format!(
-        "If holding: {if_holding}. If considering entry: {if_considering_entry}. Financial strength {:.0}/100.",
-        audit.overall_strength_score
-    );
+    let headline = if audit.data_coverage.recommendation_gated {
+        let noun = if company_type.is_bank() {
+            "bank"
+        } else if company_type.is_lender() {
+            "NBFC"
+        } else {
+            "company"
+        };
+        format!(
+            "Yahoo multiples are not a complete {noun} quality call: asset-quality, capital-adequacy and margin data are insufficient. Do not classify as a value trap solely from debt/CFO metrics."
+        )
+    } else {
+        format!(
+            "If holding: {if_holding}. If considering entry: {if_considering_entry}. Financial strength {}.",
+            if audit.scores_provisional {
+                "N/A".to_string()
+            } else {
+                audit
+                    .overall_strength_score
+                    .map(|s| format!("{:.0}/100", s))
+                    .unwrap_or_else(|| "N/A".to_string())
+            }
+        )
+    };
 
     ActionGuidance {
         if_holding,
@@ -1019,7 +1227,8 @@ pub fn build_action_guidance(
 mod tests {
     use super::*;
     use crate::models::{
-        BalanceSheetRow, CashflowRow, IncomeStatementRow, ResearchRating, ValuationAnalysis,
+        AssetProfile, BalanceSheetRow, CashflowRow, FinancialCompanyType, Financials, IncomeStatementRow,
+        ResearchRating, ValuationAnalysis,
     };
 
     fn sample_bundle_pass() -> StatementBundle {
@@ -1042,9 +1251,13 @@ mod tests {
                 income_tax_expense: 30.0,
                 depreciation: 20.0,
                 net_income: 100.0 + i as f64 * 10.0,
+                net_income_yahoo_row: None,
+                period_type: String::new(),
                 diluted_eps: Some(10.0),
                 other_income_expense: 5.0,
                 net_interest_income: 8.0,
+                interest_income: 0.0,
+                other_income: 0.0,
             });
             cashflow.push(CashflowRow {
                 end_date_fmt: format!("202{}-03-31", 4 - i),
@@ -1052,6 +1265,7 @@ mod tests {
                 operating_cashflow: 120.0 + i as f64 * 10.0,
                 capital_expenditure: 20.0,
                 free_cashflow: 100.0,
+                ..Default::default()
             });
             balance.push(BalanceSheetRow {
                 end_date_fmt: format!("202{}-03-31", 4 - i),
@@ -1069,6 +1283,7 @@ mod tests {
                 retained_earnings: 300.0,
                 goodwill: 20.0,
                 intangible_assets: 10.0,
+                ..Default::default()
             });
         }
         StatementBundle {
@@ -1097,7 +1312,7 @@ mod tests {
             .find(|i| i.metric.contains("3Y"))
             .unwrap();
         assert!(matches!(cfo3.status, AuditStatus::Pass | AuditStatus::Watch));
-        assert!(audit.overall_strength_score > 50.0);
+        assert!(audit.overall_strength_score.unwrap_or(0.0) > 50.0);
     }
 
     #[test]
@@ -1107,7 +1322,7 @@ mod tests {
             &bundle,
             &Financials {
                 return_on_capital_employed: Some(0.22),
-                debt_to_equity: 0.3,
+                debt_to_equity: Some(0.3),
                 ..Financials::default()
             },
             &AssetProfile::default(),
@@ -1115,17 +1330,144 @@ mod tests {
             None,
         );
         let rating = ResearchRating {
-            overall_score: 72.0,
-            quality_score: 70.0,
-            rating_label: "Buy Candidate".to_string(),
+            overall_score: Some(72.0),
+            financial_quality_score: Some(70.0),
+            rating_label: "Buy / Accumulate".to_string(),
+            technical_rating: "Neutral".to_string(),
             ..ResearchRating::default()
         };
         let valuation = ValuationAnalysis {
             valuation_label: "Cheap".to_string(),
             ..ValuationAnalysis::default()
         };
-        let action = build_action_guidance(&audit, &rating, &valuation, &MarketSignals::default());
+        let action = build_action_guidance(&audit, &rating, &valuation, &MarketSignals::default(), FinancialCompanyType::Industrial);
         assert_eq!(action.if_considering_entry, "Buy");
+    }
+
+    #[test]
+    fn action_guidance_watchlist_is_not_buy() {
+        let bundle = sample_bundle_pass();
+        let audit = build_financial_strength_audit(
+            &bundle,
+            &Financials {
+                return_on_capital_employed: Some(0.22),
+                debt_to_equity: Some(0.3),
+                ..Financials::default()
+            },
+            &AssetProfile::default(),
+            None,
+            None,
+        );
+        let rating = ResearchRating {
+            overall_score: Some(65.5),
+            financial_quality_score: Some(70.0),
+            rating_label: "Watchlist".to_string(),
+            technical_rating: "Neutral".to_string(),
+            ..ResearchRating::default()
+        };
+        let valuation = ValuationAnalysis {
+            valuation_label: "Cheap".to_string(),
+            ..ValuationAnalysis::default()
+        };
+        let action = build_action_guidance(&audit, &rating, &valuation, &MarketSignals::default(), FinancialCompanyType::Industrial);
+        assert_eq!(action.if_considering_entry, "Watch / stagger only");
+    }
+
+    #[test]
+    fn rec_yahoo_only_audit_does_not_score_missing_as_fifty() {
+        let profile = AssetProfile {
+            sector: Some("Financial Services".into()),
+            industry: Some("Credit Services".into()),
+            long_name: Some("REC Limited".into()),
+            long_business_summary: Some("Rural electrification project finance.".into()),
+            ..Default::default()
+        };
+        let coverage = crate::financial_company::build_data_coverage(
+            FinancialCompanyType::NbfcProjectFinance,
+            &Financials::default(),
+            &crate::models::CanonicalMetrics::default(),
+            None,
+        );
+        let audit = build_financial_strength_audit_for(
+            &sample_bundle_pass(),
+            &Financials::default(),
+            &profile,
+            None,
+            None,
+            FinancialCompanyType::NbfcProjectFinance,
+            coverage,
+        );
+        assert!(audit.scores_provisional);
+        assert_eq!(audit.financial_quality_display, "N/A");
+        assert!(audit.earnings_quality_score.is_none());
+        assert!(audit.balance_sheet_score.is_none());
+        assert!(audit.overall_strength_score.is_none());
+        assert!(audit.interpretation.contains("not in Yahoo") || audit.interpretation.contains("N/A"));
+        assert!(audit.checklist.iter().any(|i| i.metric.contains("CASA") && (i.value_display.contains("Not") || i.note.contains("NBFCs"))));
+    }
+
+    #[test]
+    fn bank_crar_benchmark_is_not_nbfc_text() {
+        let profile = AssetProfile {
+            sector: Some("Financial Services".into()),
+            industry: Some("Banks - Regional".into()),
+            ..Default::default()
+        };
+        let coverage = crate::financial_company::build_data_coverage(
+            FinancialCompanyType::Bank,
+            &Financials::default(),
+            &crate::models::CanonicalMetrics::default(),
+            None,
+        );
+        let audit = build_financial_strength_audit_for(
+            &sample_bundle_pass(),
+            &Financials::default(),
+            &profile,
+            None,
+            None,
+            FinancialCompanyType::Bank,
+            coverage,
+        );
+        let crar = audit.checklist.iter().find(|i| i.metric == "CRAR").unwrap();
+        assert!(crar.benchmark.contains("RBI minimum"));
+        assert!(!crar.benchmark.contains("NBFCs"));
+    }
+
+    #[test]
+    fn bank_gated_guidance_uses_bank_quality_wording() {
+        let coverage = crate::financial_company::build_data_coverage(
+            FinancialCompanyType::Bank,
+            &Financials::default(),
+            &crate::models::CanonicalMetrics::default(),
+            None,
+        );
+        let audit = build_financial_strength_audit_for(
+            &sample_bundle_pass(),
+            &Financials::default(),
+            &AssetProfile {
+                sector: Some("Financial Services".into()),
+                industry: Some("Banks - Regional".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+            FinancialCompanyType::Bank,
+            coverage,
+        );
+        assert!(audit.data_coverage.recommendation_gated);
+        let action = build_action_guidance(
+            &audit,
+            &ResearchRating::default(),
+            &ValuationAnalysis::default(),
+            &MarketSignals::default(),
+            FinancialCompanyType::Bank,
+        );
+        assert!(action.headline.contains("bank quality call"));
+        assert!(!action.headline.contains("bank/NBFC"));
+        assert!(action
+            .wait_for_events
+            .iter()
+            .any(|e| e.contains("CASA") && e.contains("LDR") && e.contains("CET1")));
     }
 
     #[test]
@@ -1149,7 +1491,7 @@ mod tests {
         assert_eq!(cfo3.status, AuditStatus::Fail);
         let rating = ResearchRating::default();
         let valuation = ValuationAnalysis::default();
-        let action = build_action_guidance(&audit, &rating, &valuation, &MarketSignals::default());
+        let action = build_action_guidance(&audit, &rating, &valuation, &MarketSignals::default(), FinancialCompanyType::Industrial);
         assert_eq!(action.if_considering_entry, "Avoid");
         assert!(action.if_holding == "Sell" || action.if_holding == "Trim");
     }

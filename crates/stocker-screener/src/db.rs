@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+use sqlx::migrate::Migration;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 
@@ -38,7 +39,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .connect_with(opts)
         .await?;
 
-    prune_orphan_applied_migrations(&pool).await?;
+    repair_applied_migrations(&pool).await?;
     MIGRATOR.run(&pool).await?;
 
     validate_catalog().map_err(Error::Other)?;
@@ -73,15 +74,20 @@ pub async fn open_memory() -> Result<SqlitePool> {
         .max_connections(1)
         .connect_with(opts)
         .await?;
+    repair_applied_migrations(&pool).await?;
     MIGRATOR.run(&pool).await?;
     validate_catalog().map_err(Error::Other)?;
     validate_schema(&pool).await?;
     Ok(pool)
 }
 
-/// Drop `_sqlx_migrations` rows for SQL files that no longer exist (e.g. one-off
-/// repair migrations removed after they ran on existing databases).
-async fn prune_orphan_applied_migrations(pool: &SqlitePool) -> Result<()> {
+struct AppliedMigration {
+    checksum: Vec<u8>,
+}
+
+/// Fix `_sqlx_migrations` drift before sqlx runs (orphan rows, edited SQL checksums,
+/// or DDL that landed without a migration row — common after interrupted ALTER chains).
+async fn repair_applied_migrations(pool: &SqlitePool) -> Result<()> {
     let exists: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
@@ -91,6 +97,15 @@ async fn prune_orphan_applied_migrations(pool: &SqlitePool) -> Result<()> {
         return Ok(());
     }
 
+    prune_orphan_applied_migrations(pool).await?;
+    backfill_missing_migration_records(pool).await?;
+    repair_checksums_when_schema_applied(pool).await?;
+    Ok(())
+}
+
+/// Drop `_sqlx_migrations` rows for SQL files that no longer exist (e.g. one-off
+/// repair migrations removed after they ran on existing databases).
+async fn prune_orphan_applied_migrations(pool: &SqlitePool) -> Result<()> {
     let known: HashSet<i64> = MIGRATOR.migrations.iter().map(|m| m.version).collect();
     let rows = sqlx::query("SELECT version FROM _sqlx_migrations")
         .fetch_all(pool)
@@ -108,6 +123,118 @@ async fn prune_orphan_applied_migrations(pool: &SqlitePool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// If DDL from a migration is already on the DB but `_sqlx_migrations` has no row
+/// (e.g. SQLite auto-committed ALTER then migration failed), insert the record so
+/// sqlx does not try to re-run it.
+async fn backfill_missing_migration_records(pool: &SqlitePool) -> Result<()> {
+    for file in MIGRATOR.migrations.iter() {
+        if applied_migration(pool, file.version).await?.is_some() {
+            continue;
+        }
+        if !migration_schema_applied(pool, file.version).await? {
+            continue;
+        }
+        log::warn!(
+            "backfilling screener migration record for version {} ({}) — schema already present",
+            file.version,
+            file.description
+        );
+        insert_migration_record(pool, file).await?;
+    }
+    Ok(())
+}
+
+/// When a migration's SQL changed after it ran but the schema already matches, refresh checksums.
+/// Avoids sqlx's "migration N was previously applied but has been modified" after local SQL
+/// content/CRLF edits that do not need to re-run DDL.
+async fn repair_checksums_when_schema_applied(pool: &SqlitePool) -> Result<()> {
+    for file in MIGRATOR.migrations.iter() {
+        let Some(rec) = applied_migration(pool, file.version).await? else {
+            continue;
+        };
+        if rec.checksum == *file.checksum.as_ref() {
+            continue;
+        }
+        if !migration_schema_applied(pool, file.version).await? {
+            continue;
+        }
+        log::warn!(
+            "repairing screener migration checksum for version {} ({})",
+            file.version,
+            file.description
+        );
+        update_migration_record(pool, file).await?;
+    }
+    Ok(())
+}
+
+async fn applied_migration(pool: &SqlitePool, version: i64) -> Result<Option<AppliedMigration>> {
+    let row = sqlx::query("SELECT version, checksum FROM _sqlx_migrations WHERE version = ?")
+        .bind(version)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|row| AppliedMigration {
+        checksum: row.try_get("checksum").unwrap_or_default(),
+    }))
+}
+
+async fn update_migration_record(pool: &SqlitePool, file: &Migration) -> Result<()> {
+    sqlx::query("UPDATE _sqlx_migrations SET description = ?, checksum = ? WHERE version = ?")
+        .bind(&file.description)
+        .bind(file.checksum.as_ref())
+        .bind(file.version)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn insert_migration_record(pool: &SqlitePool, file: &Migration) -> Result<()> {
+    // Match sqlx's `_sqlx_migrations` shape (version, description, installed_on, success, checksum, execution_time).
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time) \
+         VALUES (?, ?, CURRENT_TIMESTAMP, 1, ?, 0)",
+    )
+    .bind(file.version)
+    .bind(&file.description)
+    .bind(file.checksum.as_ref())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool> {
+    let exists: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .bind(table)
+    .fetch_optional(pool)
+    .await?;
+    Ok(exists.is_some())
+}
+
+async fn table_has_column(pool: &SqlitePool, table: &str, column: &str) -> Result<bool> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.try_get::<String, _>("name").ok())
+        .any(|name| name == column))
+}
+
+async fn migration_schema_applied(pool: &SqlitePool, version: i64) -> Result<bool> {
+    match version {
+        1 => Ok(table_exists(pool, "symbols").await? && table_exists(pool, "snapshots").await?),
+        2 => table_has_column(pool, "symbols", "face_value").await,
+        3 => Ok(table_has_column(pool, "snapshots", "cumulative_cfo_pat_3y").await?
+            && table_has_column(pool, "snapshots", "days_inventory_change_3y").await?),
+        4 => table_has_column(pool, "symbols", "isin").await,
+        5 => Ok(table_has_column(pool, "snapshots", "moat_score").await?
+            && table_has_column(pool, "snapshots", "business_tier").await?),
+        _ => Ok(false),
+    }
 }
 
 /// Confirm that every catalog column exists on `snapshots`. Catches drift between

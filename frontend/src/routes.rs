@@ -7,6 +7,7 @@ use crate::portfolio::{
 };
 use crate::report::Report;
 use crate::screener::Screener;
+use crate::sectors::{SectorDetailPage, SectorsList};
 use crate::stocks::Stocks;
 use crate::sync::DriveSync;
 use crate::sync_portfolio::{
@@ -24,6 +25,10 @@ pub enum Route {
     Screener {},
     #[route("/stocks")]
     Stocks {},
+    #[route("/sectors")]
+    SectorsList {},
+    #[route("/sectors/:sector")]
+    SectorDetailPage { sector: String },
     #[route("/sync")]
     DriveSync {},
     #[route("/sync/portfolio/:id")]

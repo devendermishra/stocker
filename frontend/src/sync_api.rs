@@ -142,6 +142,12 @@ mod stub {
         pub vault_unlocked: bool,
         pub oauth_configured: bool,
         pub recommendation: String,
+        #[serde(default)]
+        pub portfolio_db_present: bool,
+        #[serde(default)]
+        pub last_backup_files: Vec<String>,
+        #[serde(default)]
+        pub remote_backup_files: Vec<String>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,8 +218,8 @@ mod stub {
     }
 
     pub fn schedule_restart_after_pull() {}
-    pub fn format_recommendation(_rec: ()) -> String {
-        String::new()
+    pub fn format_recommendation(rec: String) -> String {
+        rec
     }
 }
 

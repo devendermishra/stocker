@@ -54,6 +54,14 @@ pub fn research_tab(r: &ResearchReport) -> Element {
     let s = &r.research_summary;
     let ag = &s.action_guidance;
     let audit = &r.financial_strength_audit;
+    let quality_disp = if !audit.financial_quality_display.is_empty() {
+        audit.financial_quality_display.clone()
+    } else {
+        audit
+            .overall_strength_score
+            .map(|s| format!("{:.0}/100", s))
+            .unwrap_or_else(|| "N/A".to_string())
+    };
     let ms = &r.market_signals;
     let company_heading = format!("{} ({})", o.company_name, o.ticker);
     let exchange_line = format!(
@@ -72,20 +80,36 @@ pub fn research_tab(r: &ResearchReport) -> Element {
         o.currency.clone().unwrap_or_else(|| "—".to_string()),
         o.country.clone().unwrap_or_else(|| "—".to_string()),
     );
-    let fiscal_q = format!(
-        "Latest fiscal year: {} · Latest quarter: {}",
-        o.latest_fiscal_year_end.clone().unwrap_or_else(|| "—".to_string()),
-        o.latest_quarter_end.clone().unwrap_or_else(|| "—".to_string()),
-    );
+    let fiscal_q = {
+        let yahoo_q = o.latest_yahoo_quarter_end.clone().unwrap_or_else(|| "—".to_string());
+        let reported = o.latest_reported_quarter_end.clone().unwrap_or_else(|| "N/A — Yahoo-only".to_string());
+        let stale = if o.quarterly_statement_stale {
+            let age = o.quarterly_statement_age_days.map(|d| format!(" · {d} days old")).unwrap_or_default();
+            format!(" · Yahoo quarterly series STALE{age}")
+        } else {
+            String::new()
+        };
+        format!(
+            "Latest fiscal year: {} · Latest Yahoo quarter: {} · Latest reported quarter: {}{stale}",
+            o.latest_fiscal_year_end.clone().unwrap_or_else(|| "—".to_string()),
+            yahoo_q,
+            reported,
+        )
+    };
     let val_label_line = format!(
         "Label: {} · Data confidence: {}",
         v.valuation_label, v.confidence
     );
-    let pe_line = format!("P/E: {:.2} · Forward P/E: {:.2}", v.pe, v.forward_pe);
+    let pe_line = format!(
+        "P/E: {} · Forward P/E (Yahoo API; public page may show unavailable): {}",
+        if v.pe > 0.0 { format!("{:.2}", v.pe) } else { "N/A".to_string() },
+        crate::format::fmt_opt_multiple(v.forward_pe)
+    );
     let pb_line = format!("P/B: {:.2} · P/S: {:.2}", v.price_to_book, v.price_to_sales);
     let ev_line = format!(
-        "EV/EBITDA: {} · EV/Sales: {}",
-        fmt_opt_num(v.ev_to_ebitda),
+        "Yahoo EV/EBITDA: {} · Calculated EV/EBITDA (quote cash): {} · EV/Sales: {}",
+        fmt_opt_num(v.yahoo_ev_to_ebitda),
+        fmt_opt_num(v.calculated_ev_to_ebitda),
         fmt_opt_num(v.ev_to_sales)
     );
     let peg_line = format!(
@@ -94,7 +118,7 @@ pub fn research_tab(r: &ResearchReport) -> Element {
         v.dividend_yield * 100.0
     );
     let yield_line = format!(
-        "Earnings yield: {} · FCF yield: {}",
+        "Earnings yield (EPS/price): {} · FCF yield (CFO − capex / mcap): {}",
         fmt_opt_pct(v.earnings_yield_pct),
         fmt_opt_pct(v.fcf_yield_pct)
     );
@@ -105,12 +129,23 @@ pub fn research_tab(r: &ResearchReport) -> Element {
         fmt_opt_num(v.historical.median_pb_3y),
         fmt_opt_num(v.historical.median_pb_5y),
     );
-    let earn_based = format!(
-        "Earnings-based (heuristic): base {}, fair {} · Upside/downside: {}",
-        fmt_price_in_currency(v.earnings_based.base_value, cur),
-        fmt_price_in_currency(v.earnings_based.fair_value, cur),
-        fmt_opt_pct(v.earnings_based.upside_downside_pct),
-    );
+    let earn_based = if v.earnings_based.is_model_assumption {
+        format!(
+            "Earnings-based model (not a yfinance fact): fair P/E {:.1}× · base {} · fair {} · Upside/downside: {}. {}",
+            v.earnings_based.fair_pe,
+            fmt_price_in_currency(v.earnings_based.base_value, cur),
+            fmt_price_in_currency(v.earnings_based.fair_value, cur),
+            fmt_opt_pct(v.earnings_based.upside_downside_pct),
+            v.earnings_based.assumption_note,
+        )
+    } else {
+        format!(
+            "Earnings-based (heuristic): base {}, fair {} · Upside/downside: {}",
+            fmt_price_in_currency(v.earnings_based.base_value, cur),
+            fmt_price_in_currency(v.earnings_based.fair_value, cur),
+            fmt_opt_pct(v.earnings_based.upside_downside_pct),
+        )
+    };
     let sma_line = format!(
         "SMA20: {} · SMA50: {} · SMA100: {} · SMA200: {}",
         fmt_opt_num(t.trend.sma_20),
@@ -146,22 +181,65 @@ pub fn research_tab(r: &ResearchReport) -> Element {
         "52W distance from high: {}%",
         fmt_opt_num(t.volatility.dist_from_high_pct)
     );
-    let scores_line = format!(
-        "Growth: {:.0} · Quality: {:.0} · Valuation: {:.0} · Technical: {:.0} · Risk: {:.0}",
-        rr.growth_score,
-        rr.quality_score,
-        rr.valuation_score,
-        rr.technical_score,
-        rr.risk_score,
-    );
+    let dq = if rr.data_quality_score > 0.0 {
+        rr.data_quality_score
+    } else {
+        r.stock_analysis.data_quality_score
+    };
+    let risk_disp = rr
+        .risk_penalty
+        .map(|p| format!("{:.0}", p))
+        .unwrap_or_else(|| "N/A".to_string());
+    let scores_line = if rr.overall_score_provisional {
+        format!(
+            "Growth: {:.0} · Financial quality: N/A · Data quality: {:.0} · Valuation: {:.0} · Technical: {:.0} · Risk penalty: {risk_disp}",
+            rr.growth_score,
+            dq,
+            rr.valuation_score,
+            rr.technical_score,
+        )
+    } else {
+        format!(
+            "Growth: {:.0} · Financial quality: {} · Data quality: {:.0} · Valuation: {:.0} · Technical: {:.0} · Risk penalty: {risk_disp}",
+            rr.growth_score,
+            rr.financial_quality_score
+                .or(rr.screening_quality_score)
+                .map(|s| format!("{:.0}", s))
+                .unwrap_or_else(|| "N/A".to_string()),
+            dq,
+            rr.valuation_score,
+            rr.technical_score,
+        )
+    };
+    let fund_risk = if rr.fundamental_risk_rating.is_empty() {
+        rr.risk_rating.clone()
+    } else {
+        rr.fundamental_risk_rating.clone()
+    };
     let ratings_line = format!(
-        "Fundamental view: {} · Valuation: {} · Technical: {} · Risk: {}",
+        "Fundamental view: {} · Valuation: {} · Technical: {} · Fundamental risk: {} · Market beta risk: {}",
         rr.fundamental_rating,
         rr.valuation_rating,
         rr.technical_rating,
-        rr.risk_rating,
+        fund_risk,
+        if rr.market_beta_risk.is_empty() { "N/A".to_string() } else { rr.market_beta_risk.clone() },
     );
-    let overall_hdr = format!("{:.0}/100 — {}", rr.overall_score, rr.rating_label);
+    let overall_hdr = if rr.overall_score_provisional {
+        format!(
+            "Available-metric score {:.0}/100 — {} (critical coverage insufficient; rating withheld)",
+            r.score_breakdown
+                .available_dimension_score
+                .or(rr.provisional_screening_score)
+                .unwrap_or(0.0),
+            rr.rating_label
+        )
+    } else {
+        format!(
+            "{:.0}/100 — {}",
+            rr.overall_score.unwrap_or(0.0),
+            rr.rating_label
+        )
+    };
     let explain_lines: Vec<String> = rr
         .explain
         .iter()
@@ -200,8 +278,27 @@ pub fn research_tab(r: &ResearchReport) -> Element {
         div { style: "{card}; margin-top: 0.55rem;",
             h3 { style: "margin-top:0;", "Financial strength audit" }
             p { style: "margin: 0 0 0.45rem; font-size: 0.9rem;",
-                "Overall: " strong { "{audit.overall_strength_score:.0}/100" }
-                " · Earnings quality: {audit.earnings_quality_score:.0}/100 · Balance sheet: {audit.balance_sheet_score:.0}/100 · Confidence: {audit.confidence}"
+                "Financial quality: " strong { "{quality_disp}" }
+                if audit.scores_provisional {
+                    " · Provisional (missing critical lender data)"
+                }
+                " · Confidence: {audit.confidence}"
+            }
+            if audit.data_coverage.overall_pct > 0.0 || audit.data_coverage.recommendation_gated {
+                p { style: "margin: 0 0 0.35rem; font-size: 0.86rem; color:#333;",
+                    "Data coverage: {audit.data_coverage.overall_pct:.0}% · Critical lender coverage: {audit.data_coverage.critical_pct:.0}% ({audit.data_coverage.critical_present}/{audit.data_coverage.critical_total})"
+                }
+                ul { style: "margin: 0 0 0.45rem; padding-left: 1.1rem; font-size: 0.82rem; color:#555;",
+                    for d in &audit.data_coverage.dimensions {
+                        li { "{d.name}: {d.coverage_pct:.0}% ({d.present}/{d.total})" }
+                    }
+                }
+                if let Some(g) = &audit.data_coverage.gate_reason {
+                    p { style: "margin: 0 0 0.45rem; font-size: 0.86rem; color:#8a4a00;", "{g}" }
+                }
+            }
+            if !audit.quality_weights_note.is_empty() {
+                p { style: "margin: 0 0 0.45rem; font-size: 0.82rem; color:#555;", "{audit.quality_weights_note}" }
             }
             p { style: "margin: 0 0 0.5rem; font-size: 0.88rem; color:#333; line-height: 1.45;", "{audit.interpretation}" }
             table { style: "width:100%; border-collapse: collapse; font-size: 0.85rem;",
@@ -277,6 +374,11 @@ pub fn research_tab(r: &ResearchReport) -> Element {
         div { style: "{card}",
             h3 { style: "margin-top:0;", "Company overview" }
             p { style: "margin: 0.25rem 0;", strong { "{company_heading}" } }
+            if !o.financial_company_type_label.is_empty() {
+                p { style: "margin: 0.2rem 0; color:#184ad8; font-weight:600;",
+                    "Company type: {o.financial_company_type_label} ({o.financial_company_type})"
+                }
+            }
             p { style: "margin: 0.2rem 0; color:#444;", "{exchange_line}" }
             p { style: "margin: 0.2rem 0;", "{price_mc}" }
             p { style: "margin: 0.2rem 0; font-size: 0.9rem;", "{curr_country}" }
@@ -294,11 +396,11 @@ pub fn research_tab(r: &ResearchReport) -> Element {
         details { style: "{card}; margin-top: 0.55rem;",
             summary { style: "cursor: pointer; font-weight: 600;", "Fundamental analysis" }
             div { style: "margin-top: 0.65rem; display: grid; gap: 0.75rem;",
-                FundamentalsBlock { title: "Growth".to_string(), interpretation: f.growth.interpretation.clone(), confidence: f.growth.confidence.clone(), lines: f.growth.lines.clone(), flags: f.growth.flags.clone() }
-                FundamentalsBlock { title: "Profitability".to_string(), interpretation: f.profitability.interpretation.clone(), confidence: f.profitability.confidence.clone(), lines: f.profitability.lines.clone(), flags: f.profitability.flags.clone() }
-                FundamentalsBlock { title: "Balance sheet".to_string(), interpretation: f.balance_sheet.interpretation.clone(), confidence: f.balance_sheet.confidence.clone(), lines: f.balance_sheet.lines.clone(), flags: f.balance_sheet.flags.clone() }
-                FundamentalsBlock { title: "Cash flow quality".to_string(), interpretation: f.cash_flow.interpretation.clone(), confidence: f.cash_flow.confidence.clone(), lines: f.cash_flow.lines.clone(), flags: f.cash_flow.flags.clone() }
-                FundamentalsBlock { title: "Efficiency".to_string(), interpretation: f.efficiency.interpretation.clone(), confidence: f.efficiency.confidence.clone(), lines: f.efficiency.lines.clone(), flags: f.efficiency.flags.clone() }
+                FundamentalsBlock { title: if f.growth.title.is_empty() { "Growth".to_string() } else { f.growth.title.clone() }, interpretation: f.growth.interpretation.clone(), confidence: f.growth.confidence.clone(), lines: f.growth.lines.clone(), flags: f.growth.flags.clone() }
+                FundamentalsBlock { title: if f.profitability.title.is_empty() { "Profitability".to_string() } else { f.profitability.title.clone() }, interpretation: f.profitability.interpretation.clone(), confidence: f.profitability.confidence.clone(), lines: f.profitability.lines.clone(), flags: f.profitability.flags.clone() }
+                FundamentalsBlock { title: if f.balance_sheet.title.is_empty() { "Balance sheet".to_string() } else { f.balance_sheet.title.clone() }, interpretation: f.balance_sheet.interpretation.clone(), confidence: f.balance_sheet.confidence.clone(), lines: f.balance_sheet.lines.clone(), flags: f.balance_sheet.flags.clone() }
+                FundamentalsBlock { title: if f.cash_flow.title.is_empty() { "Cash flow quality".to_string() } else { f.cash_flow.title.clone() }, interpretation: f.cash_flow.interpretation.clone(), confidence: f.cash_flow.confidence.clone(), lines: f.cash_flow.lines.clone(), flags: f.cash_flow.flags.clone() }
+                FundamentalsBlock { title: if f.efficiency.title.is_empty() { "Efficiency".to_string() } else { f.efficiency.title.clone() }, interpretation: f.efficiency.interpretation.clone(), confidence: f.efficiency.confidence.clone(), lines: f.efficiency.lines.clone(), flags: f.efficiency.flags.clone() }
             }
         }
 
@@ -308,10 +410,18 @@ pub fn research_tab(r: &ResearchReport) -> Element {
                 p { style: "font-size: 0.9rem;", "{val_label_line}" }
                 p { style: "font-size: 0.88rem; color:#333;", "{v.historical_classification}" }
                 p { style: "font-size: 0.88rem;", "Peer read: {v.peer_value_read}" }
+                if !v.pb_roe_interpretation.is_empty() {
+                    p { style: "font-size: 0.88rem; color:#184ad8;", "P/B–ROE: {v.pb_roe_interpretation}" }
+                }
                 ul { style: "font-size: 0.88rem; padding-left: 1.1rem;",
                     li { "{pe_line}" }
                     li { "{pb_line}" }
-                    li { "{ev_line}" }
+                    if !v.lender_valuation {
+                        li { "{ev_line}" }
+                    }
+                    if !v.ev_to_ebitda_note.is_empty() {
+                        li { style: "color:#555;", "{v.ev_to_ebitda_note}" }
+                    }
                     li { "{peg_line}" }
                     li { "{yield_line}" }
                 }
@@ -378,6 +488,12 @@ pub fn research_tab(r: &ResearchReport) -> Element {
 
         div { style: "{card}; margin-top: 0.55rem;",
             h3 { style: "margin-top:0;", "Research summary" }
+            if !s.company_type_headline.is_empty() {
+                p { style: "font-size: 0.95rem; margin: 0 0 0.4rem; font-weight:600;", "{s.company_type_headline}" }
+            }
+            for (k, val) in &s.executive_blocks {
+                p { style: "font-size: 0.88rem; margin: 0.3rem 0;", strong { "{k}: " } "{val}" }
+            }
             p { style: "font-size: 0.9rem; margin: 0.35rem 0;", strong { "Business: " } "{s.business_quality}" }
             p { style: "font-size: 0.9rem; margin: 0.35rem 0;", strong { "Growth: " } "{s.growth}" }
             p { style: "font-size: 0.9rem; margin: 0.35rem 0;", strong { "Valuation: " } "{s.valuation}" }

@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 
 use crate::api::load_research_report;
 use crate::format::fmt_price_in_currency;
+use crate::report_export::{export_filename, report_export_bytes, save_export, ReportExportFormat};
 use crate::routes::Route;
 use crate::screener_api::{
     list_fields, load_snapshot, parse_base_id, parse_exchange, refresh_symbol, resolve_report_ticker,
@@ -20,6 +21,35 @@ use tabs::{
 pub const CARD: &str =
     "background: #fff; border: 1px solid #dfe3eb; border-radius: 12px; padding: 0.85rem;";
 
+fn spawn_report_refresh(
+    symbol: String,
+    mut refreshing: Signal<bool>,
+    mut refresh_err: Signal<Option<String>>,
+    mut metrics_reload: Signal<u32>,
+    mut report_reload: Signal<u32>,
+) {
+    spawn(async move {
+        refreshing.set(true);
+        refresh_err.set(None);
+        if let Err(e) = refresh_symbol(&symbol).await {
+            refresh_err.set(Some(e));
+        }
+        metrics_reload.set(metrics_reload() + 1);
+        report_reload.set(report_reload() + 1);
+        refreshing.set(false);
+    });
+}
+
+fn export_loaded_report(r: &crate::types::ResearchReport, format: ReportExportFormat) -> String {
+    match report_export_bytes(r, format) {
+        Ok(bytes) => {
+            let name = export_filename(&r.symbol, format);
+            save_export(&name, format.mime(), &bytes).unwrap_or_else(|e| e)
+        }
+        Err(e) => e,
+    }
+}
+
 #[component]
 pub fn Report(symbol: String) -> Element {
     let mut tab = use_signal(|| 0i32);
@@ -31,9 +61,11 @@ pub fn Report(symbol: String) -> Element {
     let mut load_ticker = use_signal(|| None::<String>);
 
     let catalog_res = use_resource(|| async { list_fields().await });
-    let mut metrics_reload = use_signal(|| 0u32);
-    let mut metrics_refreshing = use_signal(|| false);
-    let mut metrics_refresh_err = use_signal(|| None::<String>);
+    let metrics_reload = use_signal(|| 0u32);
+    let report_reload = use_signal(|| 0u32);
+    let refreshing = use_signal(|| false);
+    let refresh_err = use_signal(|| None::<String>);
+    let mut export_msg = use_signal(|| None::<String>);
 
     let sym_metrics = sym_arc.clone();
     let sym_report = sym_arc.clone();
@@ -62,6 +94,7 @@ pub fn Report(symbol: String) -> Element {
 
     let resource = use_resource(move || {
         let sym = sym_report.as_ref().clone();
+        let _n = report_reload();
         async move { load_research_report(sym).await }
     });
 
@@ -120,7 +153,37 @@ pub fn Report(symbol: String) -> Element {
                 }
             }
 
-            p { style: "color: #666; font-size: 0.9rem; margin: 0 0 0.75rem;", "Showing: {heading}" }
+            div {
+                style: "display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem; margin: 0 0 0.75rem;",
+                p { style: "color: #666; font-size: 0.9rem; margin: 0;", "Showing: {heading}" }
+                button {
+                    style: if refreshing() {
+                        "padding: 0.5rem 1rem; background: #aab4c4; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: wait;"
+                    } else {
+                        "padding: 0.5rem 1rem; background: #184ad8; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer;"
+                    },
+                    disabled: refreshing(),
+                    onclick: {
+                        let symbol = heading.clone();
+                        move |_| {
+                            spawn_report_refresh(
+                                symbol.clone(),
+                                refreshing,
+                                refresh_err,
+                                metrics_reload,
+                                report_reload,
+                            )
+                        }
+                    },
+                    if refreshing() { "Refreshing…" } else { "Refresh details" }
+                }
+            }
+            if let Some(err) = refresh_err() {
+                p { style: "color: #b00020; font-size: 0.9rem; margin: 0 0 0.75rem;", "{err}" }
+            }
+            if let Some(msg) = export_msg() {
+                p { style: "color: #2a4a2a; font-size: 0.9rem; margin: 0 0 0.75rem;", "{msg}" }
+            }
 
             match &*resource.read() {
                 None => rsx! { p { "Loading..." } },
@@ -145,7 +208,35 @@ pub fn Report(symbol: String) -> Element {
                         .as_ref()
                         .and_then(|x| x.as_ref().err().cloned());
                     let sym_for_refresh = sym_arc.as_ref().clone();
+                    let export_btn = "padding: 0.5rem 0.9rem; background: #fff; color: #184ad8; border: 1px solid #184ad8; border-radius: 8px; font-weight: 600; cursor: pointer;";
                     rsx! {
+                        div { style: "display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin: 0 0 0.75rem;",
+                            span { style: "font-size: 0.9rem; color: #555; font-weight: 600;", "Export" }
+                            button {
+                                style: "{export_btn}",
+                                onclick: {
+                                    let report = r.clone();
+                                    move |_| export_msg.set(Some(export_loaded_report(&report, ReportExportFormat::Json)))
+                                },
+                                "JSON"
+                            }
+                            button {
+                                style: "{export_btn}",
+                                onclick: {
+                                    let report = r.clone();
+                                    move |_| export_msg.set(Some(export_loaded_report(&report, ReportExportFormat::Xml)))
+                                },
+                                "XML"
+                            }
+                            button {
+                                style: "{export_btn}",
+                                onclick: {
+                                    let report = r.clone();
+                                    move |_| export_msg.set(Some(export_loaded_report(&report, ReportExportFormat::Pdf)))
+                                },
+                                "PDF"
+                            }
+                        }
                         div { style: "display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 0.6rem; margin: 0.75rem 0 1rem;",
                             div { style: "{card}", h3 { style: "margin: 0 0 0.25rem; font-size: 0.92rem; color:#555;", "Company" } p { style: "margin:0; font-weight: 600;", "{title}" } }
                             div { style: "{card}", h3 { style: "margin: 0 0 0.25rem; font-size: 0.92rem; color:#555;", "Last Price" } p { style: "margin:0; font-weight: 700;", "{fmt_price_in_currency(r.price, r.asset_profile.currency.as_deref())}" } }
@@ -177,19 +268,16 @@ pub fn Report(symbol: String) -> Element {
                                     catalog: catalog.clone(),
                                     snapshot: snapshot.clone(),
                                     load_error: metrics_load_err.clone(),
-                                    refreshing: metrics_refreshing(),
-                                    refresh_error: metrics_refresh_err().clone(),
+                                    refreshing: refreshing(),
+                                    refresh_error: refresh_err().clone(),
                                     on_refresh: move |_| {
-                                        let sym = sym_for_refresh.clone();
-                                        spawn(async move {
-                                            metrics_refreshing.set(true);
-                                            metrics_refresh_err.set(None);
-                                            match refresh_symbol(&sym).await {
-                                                Ok(()) => metrics_reload.set(metrics_reload() + 1),
-                                                Err(e) => metrics_refresh_err.set(Some(e)),
-                                            }
-                                            metrics_refreshing.set(false);
-                                        });
+                                        spawn_report_refresh(
+                                            sym_for_refresh.clone(),
+                                            refreshing,
+                                            refresh_err,
+                                            metrics_reload,
+                                            report_reload,
+                                        );
                                     },
                                 }
                             },

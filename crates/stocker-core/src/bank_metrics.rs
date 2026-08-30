@@ -54,6 +54,7 @@ fn load_bank_metrics_map() -> Option<HashMap<String, BankingMetrics>> {
                 casa_ratio_pct: row.casa_ratio_pct,
                 as_of_date: row.date,
                 source: row.source,
+                ..Default::default()
             },
         );
     }

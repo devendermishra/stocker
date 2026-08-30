@@ -98,6 +98,7 @@ See [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md) for full steps, env vars, and trouble
 | `models.rs` | Serde types (`Financials`, `ResearchReport` inputs, etc.) |
 | `report.rs` | Orchestration: parallel fetch → analysis → `ResearchReport` |
 | `analysis.rs` | Stock, management, sector, peer heuristics |
+| `sector_research.rs` | Porter Five Forces + lifecycle/type/industry profile heuristics |
 | `fundamental_analysis.rs` | Statement-based fundamentals |
 | `valuation_analysis.rs` | Multiples, historical bands, peer compare |
 | `technical_analysis.rs` | SMA, RSI, MACD, volume, ATR from chart bars |
@@ -138,6 +139,13 @@ See [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md) for full steps, env vars, and trouble
 - `POST /api/v1/screener/backfill` — universe backfill (409 if already running)
 - `POST /api/v1/screener/recompute` — recompute composites
 - `POST /api/v1/screener/scheduler/stop` — stop scheduler
+
+**Sector research** ([`crates/api/src/sectors.rs`](../crates/api/src/sectors.rs)):
+
+- `GET /api/v1/sectors` — distinct Yahoo sectors + summary badges (lifecycle, type, attractiveness, growth)
+- `GET /api/v1/sectors/{sector}` — full heuristic `SectorResearchProfile` + top members by mcap
+
+Profiles are **computed on read** from screener `symbols` + `snapshots` (no separate sector cache). Heuristics live in [`crates/stocker-core/src/sector_research.rs`](../crates/stocker-core/src/sector_research.rs): Porter Five Forces, lifecycle, sector type, demand–supply gap, competition, profitability, growth prospects, supplier/customer pricing power.
 
 ### Entry points → core / screener
 
@@ -190,7 +198,8 @@ WASM cannot link `stocker-core` or `stocker-screener` (no native HTTP/SQLite sta
 ### UI routes and tabs
 
 - Routes: [`frontend/src/routes.rs`](../frontend/src/routes.rs) — `/` (home), `/report/:symbol`, `/screener`
-- Report page: **9 tabs** — Overview, Research, Financials, **Detailed Data** (SQLite metrics), Sector, Peers, News, Management, Framework ([`frontend/src/report/mod.rs`](../frontend/src/report/mod.rs))
+- Report page: **9 tabs** — Overview, Research, Financials, **Detailed Data** (SQLite metrics), Sector (incl. heuristic sector research), Peers, News, Management, Framework ([`frontend/src/report/mod.rs`](../frontend/src/report/mod.rs))
+- Sector catalog: `/sectors`, `/sectors/:sector` ([`frontend/src/sectors/`](../frontend/src/sectors/))
 - Screener page: filter builder, results, saved screens, coverage tab, refresh/backfill button ([`frontend/src/screener/mod.rs`](../frontend/src/screener/mod.rs))
 
 ---
@@ -392,5 +401,5 @@ flowchart TD
 **External:** `YahooFinance` (quoteSummary, chart, search, crumb)  
 **Key artifacts:** `ResearchReport`, `Financials`, `ChartHistory`, `PeerQuote`, `NewsItem`, `ScreenRow`, `ScreenQuery`  
 **Key processes:** `build_research_report`, `RefreshScheduler`, `ScreenQuery`  
-**UI surfaces:** Home, Report (9 tabs), Screener (filters + coverage)  
+**UI surfaces:** Home, Report (9 tabs), Screener (filters + coverage), Sector Research (`/sectors`)  
 **Docs:** [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md), [README.md](../README.md)

@@ -1,7 +1,7 @@
 use crate::models::{
-    Financials, FinancialStrengthAudit, FundamentalAnalysis, MarketSignals, PeerQuote, ResearchRating,
+    FinancialCompanyType, Financials, FinancialStrengthAudit, FundamentalAnalysis, MarketSignals, PeerQuote, ResearchRating,
     RiskBuckets, ScoreExplanation, Shareholders, TechnicalAnalysis, TechnicalEntrySignal,
-    ValuationAnalysis,
+    ValuationAnalysis, CanonicalMetrics,
 };
 
 fn clamp01(x: f64) -> f64 {
@@ -18,33 +18,92 @@ pub fn build_research_rating(
     shareholders: &Shareholders,
     risk_buckets: &RiskBuckets,
     audit: &FinancialStrengthAudit,
-    market: &MarketSignals,
+    _market: &MarketSignals,
+    canonical: &CanonicalMetrics,
+) -> ResearchRating {
+    build_research_rating_for(
+        financials,
+        fundamental,
+        valuation,
+        technical,
+        technical_entry,
+        peers,
+        shareholders,
+        risk_buckets,
+        audit,
+        _market,
+        canonical,
+        FinancialCompanyType::Industrial,
+    )
+}
+
+pub fn build_research_rating_for(
+    financials: &Financials,
+    fundamental: &FundamentalAnalysis,
+    valuation: &ValuationAnalysis,
+    technical: &TechnicalAnalysis,
+    technical_entry: &TechnicalEntrySignal,
+    peers: &[PeerQuote],
+    shareholders: &Shareholders,
+    risk_buckets: &RiskBuckets,
+    audit: &FinancialStrengthAudit,
+    _market: &MarketSignals,
+    canonical: &CanonicalMetrics,
+    company_type: FinancialCompanyType,
 ) -> ResearchRating {
     let w = (0.20_f64, 0.25_f64, 0.25_f64, 0.15_f64, 0.15_f64);
     let mut explain = Vec::new();
 
     // Growth 0-100
     let mut growth = 50.0_f64;
-    let rg = financials.revenue_growth * 100.0;
-    let eg = financials.earnings_growth * 100.0;
-    if rg > 15.0 {
-        growth += 15.0;
-        explain.push(ScoreExplanation {
-            factor: "Revenue growth".to_string(),
-            impact: "Strong YoY revenue growth (Yahoo/statement mix)".to_string(),
-            points: 15.0,
-        });
-    } else if rg > 5.0 {
-        growth += 8.0;
-    } else if rg < 0.0 {
-        growth -= 12.0;
+    if company_type.is_lender() {
+        if let Some(g) = canonical.fy_pat_yoy_pct {
+            if g > 15.0 {
+                growth += 15.0;
+            } else if g > 5.0 {
+                growth += 8.0;
+            } else if g < 0.0 {
+                growth -= 12.0;
+            }
+        }
+        if let Some(g) = canonical.interest_income_yoy_pct {
+            if g > 10.0 {
+                growth += 8.0;
+            } else if g < 0.0 {
+                growth -= 6.0;
+            }
+        }
+        if let Some(g) = canonical.nii_yoy_pct {
+            if g > 8.0 {
+                growth += 6.0;
+            } else if g < 0.0 {
+                growth -= 6.0;
+            }
+        }
+    } else if let Some(rg) = financials.revenue_growth.map(|x| x * 100.0) {
+        if rg > 15.0 {
+            growth += 15.0;
+            explain.push(ScoreExplanation {
+                factor: "Revenue growth".to_string(),
+                impact: "Strong YoY revenue growth (Yahoo/statement mix)".to_string(),
+                points: 15.0,
+            });
+        } else if rg > 5.0 {
+            growth += 8.0;
+        } else if rg < 0.0 {
+            growth -= 12.0;
+        }
     }
-    if eg > 15.0 {
-        growth += 15.0;
-    } else if eg > 5.0 {
-        growth += 8.0;
-    } else if eg < 0.0 {
-        growth -= 12.0;
+    if !company_type.is_lender() {
+        if let Some(eg) = financials.earnings_growth.map(|x| x * 100.0) {
+            if eg > 15.0 {
+                growth += 15.0;
+            } else if eg > 5.0 {
+                growth += 8.0;
+            } else if eg < 0.0 {
+                growth -= 12.0;
+            }
+        }
     }
     if fundamental.growth.interpretation.contains("Strong") {
         growth += 10.0;
@@ -53,68 +112,61 @@ pub fn build_research_rating(
     }
     growth = clamp01(growth);
 
-    // Quality 0-100 — blend heuristic fundamentals with financial strength audit.
-    // For banks, audit already uses GNPA/NNPA/PCR; CFO/PAT-style metrics are not used.
-    let mut quality = audit.overall_strength_score * 0.40 + 27.0;
-    let roe = financials.return_on_equity * 100.0;
-    if roe > 18.0 {
-        quality += 18.0;
-    } else if roe > 12.0 {
-        quality += 10.0;
-    } else if roe < 5.0 {
-        quality -= 12.0;
+    // Quality tracks the financial-strength audit, with a small bounded adjustment — not a stacked 98/100.
+    let mut q_adj = 0.0_f64;
+    if let Some(roe) = financials.return_on_equity.map(|r| r * 100.0) {
+        if roe > 18.0 {
+            q_adj += 6.0;
+        } else if roe < 5.0 {
+            q_adj -= 6.0;
+        }
     }
-    if financials.profit_margins > 0.12 {
-        quality += 10.0;
-    } else if financials.profit_margins < 0.03 {
-        quality -= 10.0;
+    if !company_type.is_lender() {
+        if financials.profit_margins > 0.12 {
+            q_adj += 4.0;
+        } else if financials.profit_margins < 0.03 {
+            q_adj -= 4.0;
+        }
     }
-    if fundamental.cash_flow.interpretation.contains("Good") {
-        quality += 12.0;
+    if company_type.is_lender() {
+        if fundamental.cash_flow.interpretation.contains("Weak") {
+            // ignored — loan-book section must not penalize as CFO
+        }
+    } else if fundamental.cash_flow.interpretation.contains("Good") {
+        q_adj += 4.0;
     } else if fundamental.cash_flow.interpretation.contains("Weak") {
-        quality -= 12.0;
+        q_adj -= 6.0;
     }
-    if fundamental.balance_sheet.interpretation.contains("Net cash") {
-        quality += 10.0;
-    } else     if fundamental.balance_sheet.interpretation.contains("Risky") {
-        quality -= 15.0;
+    if !company_type.is_lender() {
+        if canonical.is_net_cash_equivalents {
+            q_adj += 4.0;
+        } else if fundamental.balance_sheet.interpretation.contains("Risky") {
+            q_adj -= 8.0;
+        }
     }
-    if audit.earnings_quality_score < 40.0 {
-        quality -= 15.0;
-    } else if audit.checklist.iter().any(|i| {
-        i.metric.contains("Cumulative CFO / PAT (3Y)") && i.value.map(|v| v >= 1.0).unwrap_or(false)
-    }) {
-        quality += 12.0;
+    if !audit.scores_provisional {
+        if audit.earnings_quality_score.map(|s| s < 40.0).unwrap_or(false) {
+            q_adj -= 8.0;
+        }
+        if audit.balance_sheet_score.map(|s| s < 40.0).unwrap_or(false) {
+            q_adj -= 6.0;
+        }
     }
-    if audit.balance_sheet_score < 40.0 {
-        quality -= 12.0;
-    }
-    if audit
-        .checklist
-        .iter()
-        .any(|i| i.metric == "Interest coverage" && i.value.map(|v| v < 2.0).unwrap_or(false))
+    if !company_type.is_lender()
+        && audit
+            .checklist
+            .iter()
+            .any(|i| i.metric == "Interest coverage" && i.value.map(|v| v < 2.0).unwrap_or(false))
     {
-        quality -= 10.0;
+        q_adj -= 6.0;
     }
-    if financials
-        .return_on_capital_employed
-        .map(|r| r * 100.0 > 18.0)
-        .unwrap_or(false)
-    {
-        quality += 8.0;
-    }
-    if market.analyst.net_bullish_score > 3 {
-        quality += 4.0;
-    } else if market.analyst.net_bullish_score < -3 {
-        quality -= 4.0;
-    }
-    let insider_net: f64 = market.insider_transactions.iter().map(|t| t.shares).sum();
-    if insider_net > 0.0 {
-        quality += 3.0;
-    } else if insider_net < 0.0 {
-        quality -= 3.0;
-    }
-    quality = clamp01(quality);
+    let financial_quality = if audit.scores_provisional && company_type.is_lender() {
+        None
+    } else {
+        audit
+            .overall_strength_score
+            .map(|s| clamp01(s + q_adj.clamp(-12.0, 12.0)))
+    };
 
     // Valuation: higher score when cheaper (heuristic)
     let mut val = 50.0_f64;
@@ -148,13 +200,11 @@ pub fn build_research_rating(
     } else if technical.trend.trend_label.contains("Weak") {
         tech -= 10.0;
     }
-    let rsi = technical.momentum.rsi_14.unwrap_or(50.0);
-    if rsi > 75.0 {
-        tech -= 12.0;
-    } else if rsi < 30.0 {
-        tech -= 5.0;
-    } else if rsi >= 45.0 && rsi <= 65.0 {
-        tech += 8.0;
+    match (technical.state.rsi_oversold, technical.momentum.rsi_14) {
+        (Some(true), _) => tech -= 5.0,
+        (_, Some(r)) if r > 75.0 => tech -= 12.0,
+        (_, Some(r)) if (45.0..=65.0).contains(&r) => tech += 8.0,
+        _ => {}
     }
     if technical.volume.volume_breakout {
         tech += 5.0;
@@ -163,16 +213,22 @@ pub fn build_research_rating(
 
     // Risk: start 100, subtract penalties (then invert for "risk score" display as 0-100 higher=worse)
     let mut risk_penalties = 0.0_f64;
-    if financials.debt_to_equity > 1.20 {
-        risk_penalties += 18.0;
-    } else if financials.debt_to_equity > 0.80 {
-        risk_penalties += 10.0;
+    if !company_type.is_lender() {
+        if let Some(de) = financials.debt_to_equity {
+            if de > 1.20 {
+                risk_penalties += 18.0;
+            } else if de > 0.80 {
+                risk_penalties += 10.0;
+            }
+        }
+        if financials.free_cashflow.map(|f| f < 0.0).unwrap_or(false)
+            && financials.net_income.map(|n| n > 0.0).unwrap_or(false)
+        {
+            risk_penalties += 12.0;
+        }
     }
     if shareholders.pledge_percent.unwrap_or(0.0) > 0.0 {
         risk_penalties += 15.0;
-    }
-    if financials.free_cashflow < 0.0 && financials.net_income > 0.0 {
-        risk_penalties += 12.0;
     }
     let avg_vol = peers
         .iter()
@@ -194,6 +250,7 @@ pub fn build_research_rating(
     if vol > 40.0 {
         risk_penalties += 10.0;
     }
+    let gated = audit.data_coverage.recommendation_gated;
     let high_sev = risk_buckets
         .financial_risks
         .iter()
@@ -201,38 +258,59 @@ pub fn build_research_rating(
         .chain(risk_buckets.valuation_risks.iter())
         .filter(|r| r.severity == "High")
         .count() as f64;
-    risk_penalties += high_sev * 4.0;
+    if !(gated && company_type.is_lender()) {
+        risk_penalties += high_sev * 4.0;
+    }
     risk_penalties = risk_penalties.clamp(0.0, 80.0);
-    let risk_score = clamp01(risk_penalties * 1.15);
-
-    let overall = growth * w.0 + quality * w.1 + val * w.2 + tech * w.3 + (100.0 - risk_score) * w.4;
-    let overall = clamp01(overall);
-
-    let rating_label = if overall >= 78.0 && !valuation.valuation_label.contains("Expensive") {
-        "Strong Buy Candidate"
-    } else if overall >= 68.0 {
-        "Buy Candidate"
-    } else if overall >= 58.0 {
-        "Watchlist"
-    } else if overall >= 48.0 {
-        "Hold"
-    } else if risk_score > 70.0 {
-        "High Risk"
-    } else if valuation.valuation_label.contains("Expensive") {
-        "Expensive / Wait"
+    let credit_unassessed =
+        crate::financial_company::lender_fundamental_risk_unassessed(&audit.data_coverage, company_type);
+    let risk_penalty = if (gated && company_type.is_lender()) || credit_unassessed {
+        None
     } else {
-        "Avoid"
-    }
-    .to_string();
+        Some(clamp01(risk_penalties * 1.15))
+    };
 
-    let fund_r = if quality >= 68.0 && growth >= 55.0 {
-        "Strong"
-    } else if quality >= 55.0 {
-        "Adequate"
+    let overall = if gated && company_type.is_lender() {
+        let wsum = w.0 + w.2 + w.3;
+        clamp01((growth * w.0 + val * w.2 + tech * w.3) / wsum.max(1e-9))
+    } else if credit_unassessed {
+        let q = financial_quality.unwrap_or(50.0);
+        let wsum = w.0 + w.1 + w.2 + w.3;
+        clamp01((growth * w.0 + q * w.1 + val * w.2 + tech * w.3) / wsum.max(1e-9))
     } else {
-        "Weak"
-    }
-    .to_string();
+        let q = financial_quality.unwrap_or(50.0);
+        let rp = risk_penalty.unwrap_or(0.0);
+        clamp01(growth * w.0 + q * w.1 + val * w.2 + tech * w.3 + (100.0 - rp) * w.4)
+    };
+
+    let expensive_label = valuation.valuation_label.contains("Expensive");
+    let rating_label = if gated && company_type.is_lender() {
+        "Incomplete — verify filings".to_string()
+    } else if overall >= 80.0 && !expensive_label {
+        "Strong Buy candidate".to_string()
+    } else if overall >= 70.0 {
+        "Buy / Accumulate".to_string()
+    } else if overall >= 60.0 {
+        "Watchlist".to_string()
+    } else if overall >= 50.0 {
+        "Caution".to_string()
+    } else if risk_penalty.unwrap_or(0.0) > 70.0 {
+        "High Risk".to_string()
+    } else if expensive_label {
+        "Expensive / Wait".to_string()
+    } else {
+        "Avoid".to_string()
+    };
+
+    let fund_r = if gated && company_type.is_lender() {
+        "Insufficient data".to_string()
+    } else if financial_quality.unwrap_or(0.0) >= 68.0 && growth >= 55.0 {
+        "Strong".to_string()
+    } else if financial_quality.unwrap_or(0.0) >= 55.0 {
+        "Adequate".to_string()
+    } else {
+        "Weak".to_string()
+    };
 
     let val_r = match valuation.valuation_label.as_str() {
         "Very Cheap" | "Cheap" => "Attractive",
@@ -245,23 +323,33 @@ pub fn build_research_rating(
 
     let tech_r = if technical.trend.trend_label.contains("Strong uptrend") {
         "Supportive"
-    } else if technical.momentum.rsi_14.unwrap_or(50.0) > 70.0 {
-        "Overbought"
-    } else if technical.momentum.rsi_14.unwrap_or(50.0) < 35.0 {
+    } else if technical.state.rsi_oversold == Some(true) {
         "Weak / Oversold"
+    } else if technical.state.rsi_below_35 == Some(true)
+        || technical.momentum.rsi_14.map(|r| r < 35.0).unwrap_or(false)
+    {
+        "Weak / Near oversold"
+    } else if technical.momentum.rsi_14.map(|r| r > 70.0).unwrap_or(false) {
+        "Overbought"
     } else {
         "Neutral"
     }
     .to_string();
 
-    let risk_r = if risk_score > 65.0 {
-        "High"
-    } else if risk_score > 40.0 {
-        "Medium"
+    let risk_r = if credit_unassessed {
+        "Unassessed / insufficient data".to_string()
+    } else if gated && company_type.is_lender() {
+        "Unassessed / insufficient data".to_string()
+    } else if risk_penalty.unwrap_or(0.0) > 65.0 {
+        "High".to_string()
+    } else if risk_penalty.unwrap_or(0.0) > 40.0 {
+        "Elevated".to_string()
+    } else if risk_penalty.unwrap_or(0.0) > 15.0 {
+        "Moderate".to_string()
     } else {
-        "Moderate"
-    }
-    .to_string();
+        "Low".to_string()
+    };
+    let market_beta_risk = crate::financial_company::market_beta_risk_label(financials.beta);
 
     explain.push(ScoreExplanation {
         factor: "Composite".to_string(),
@@ -276,18 +364,32 @@ pub fn build_research_rating(
         points: overall,
     });
 
+    let data_quality_score = crate::analysis::evaluate_quality_for(financials, company_type);
+    let screening_quality_score = if gated && company_type.is_lender() {
+        None
+    } else {
+        financial_quality
+    };
+    let overall_score_provisional = gated && company_type.is_lender();
+
     ResearchRating {
         growth_score: growth,
-        quality_score: quality,
+        financial_quality_score: financial_quality,
         valuation_score: val,
         technical_score: tech,
-        risk_score,
-        overall_score: overall,
+        risk_penalty,
+        overall_score: if overall_score_provisional { None } else { Some(overall) },
+        overall_score_provisional,
+        provisional_screening_score: if overall_score_provisional { Some(overall) } else { None },
+        data_quality_score,
+        screening_quality_score,
         rating_label,
         fundamental_rating: fund_r,
         valuation_rating: val_r,
         technical_rating: tech_r,
-        risk_rating: risk_r,
+        risk_rating: risk_r.clone(),
+        fundamental_risk_rating: risk_r,
+        market_beta_risk,
         weights: w,
         explain,
         cheap_fair_expensive_fundamental: valuation.valuation_label.clone(),

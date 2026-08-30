@@ -1,8 +1,9 @@
 use crate::math::median;
 use crate::models::{
-    ChartHistory, EarningsBasedValue, Financials, FundamentalAnalysis, HistoricalMultiples,
+    ChartHistory, EarningsBasedValue, FinancialCompanyType, Financials, FundamentalAnalysis, HistoricalMultiples,
     IncomeStatementRow, PeerQuote, PeerValuationCompare, StatementBundle, ValuationAnalysis,
 };
+use crate::financial_company::pb_roe_interpretation;
 
 fn closest_close(chart: &ChartHistory, target_ts: i64) -> Option<f64> {
     if chart.bars.is_empty() {
@@ -101,6 +102,33 @@ pub fn build_valuation_analysis(
     subject: &PeerQuote,
     peers: &[PeerQuote],
     fundamental: &FundamentalAnalysis,
+    peer_comparability: &str,
+) -> ValuationAnalysis {
+    build_valuation_analysis_for(
+        price,
+        financials,
+        chart,
+        bundle,
+        subject,
+        peers,
+        fundamental,
+        peer_comparability,
+        FinancialCompanyType::Industrial,
+        false,
+    )
+}
+
+pub fn build_valuation_analysis_for(
+    price: f64,
+    financials: &Financials,
+    chart: &ChartHistory,
+    bundle: &StatementBundle,
+    subject: &PeerQuote,
+    peers: &[PeerQuote],
+    fundamental: &FundamentalAnalysis,
+    peer_comparability: &str,
+    company_type: FinancialCompanyType,
+    coverage_gated: bool,
 ) -> ValuationAnalysis {
     let mut inc = bundle.income_annual.clone();
     inc.sort_by(|a, b| a.end_ts.unwrap_or(0).cmp(&b.end_ts.unwrap_or(0)));
@@ -161,10 +189,10 @@ pub fn build_valuation_analysis(
     let m_pb = peer_median(peers, |p| (p.price_to_book > 0.0).then_some(p.price_to_book));
     let m_ev = peer_median(peers, |p| p.ev_to_ebitda);
     let m_ps = peer_median(peers, |p| (p.price_to_sales > 0.0).then_some(p.price_to_sales));
-    let m_roe = peer_median(peers, |p| Some(p.return_on_equity));
+    let m_roe = peer_median(peers, |p| p.return_on_equity);
     let m_roce = peer_median(peers, |p| p.return_on_capital_employed);
-    let m_rg = peer_median(peers, |p| Some(p.revenue_growth));
-    let m_pg = peer_median(peers, |p| Some(p.pat_growth));
+    let m_rg = peer_median(peers, |p| p.revenue_growth);
+    let m_pg = peer_median(peers, |p| p.pat_growth);
 
     let pct_vs = |cur: f64, med: Option<f64>| -> Option<f64> {
         let m = med?;
@@ -176,56 +204,110 @@ pub fn build_valuation_analysis(
 
     let peer_interp = {
         let pr = subject.pe_ratio;
-        let rg = subject.revenue_growth;
-        let roe = subject.return_on_equity;
+        let rg = subject.revenue_growth.unwrap_or(0.0);
         let mpe = m_pe.unwrap_or(0.0);
         let mrg = m_rg.unwrap_or(0.0);
-        let mroe = m_roe.unwrap_or(0.0);
-        if mpe > 0.0 && pr > mpe * 1.15 && rg >= mrg && roe >= mroe {
-            "Premium may be justified: higher multiple with growth/ROE at or above peer median."
+        let roe_at_or_above = match (subject.return_on_equity, m_roe) {
+            (Some(roe), Some(mroe)) => roe >= mroe,
+            _ => false,
+        };
+        let roe_near = match (subject.return_on_equity, m_roe) {
+            (Some(roe), Some(mroe)) => roe >= mroe * 0.9,
+            _ => false,
+        };
+        let low = peer_comparability.eq_ignore_ascii_case("low");
+        if low {
+            "The name trades at a significant premium or discount to the selected peer set; comparison quality is low because the business mix may not match those peers (e.g. telecom, retail, and other segments vs oil/refining)."
+                .to_string()
+        } else if mpe > 0.0 && pr > mpe * 1.15 && rg >= mrg && roe_at_or_above {
+            "Premium may be justified: higher multiple with growth/ROE at or above peer median.".to_string()
         } else if mpe > 0.0 && pr > mpe * 1.15 {
-            "Overvalued vs peers on P/E without clearly better growth/ROE."
-        } else if mpe > 0.0 && pr < mpe * 0.85 && rg >= mrg * 0.9 && roe >= mroe * 0.9 {
-            "Undervalued vs peers with similar or better growth/ROE (heuristic)."
+            "Overvalued vs peers on P/E without clearly better growth/ROE.".to_string()
+        } else if mpe > 0.0 && pr < mpe * 0.85 && rg >= mrg * 0.9 && roe_near {
+            "Undervalued vs peers with similar or better growth/ROE (heuristic).".to_string()
         } else if mpe > 0.0 && pr < mpe * 0.85 {
-            "Cheap vs peers — check for value-trap fundamentals (growth, ROCE, leverage, FCF)."
+            if company_type.is_lender() {
+                "Cheap vs peers on P/E — confirm with P/B vs ROE and asset quality, not CFO.".to_string()
+            } else {
+                "Cheap vs peers — check for value-trap fundamentals (growth, ROCE, leverage, FCF).".to_string()
+            }
         } else {
-            "Peer multiples near the median band for this sample."
+            "Peer multiples near the median band for this sample.".to_string()
         }
-        .to_string()
     };
 
-    let value_trap = fundamental.growth.interpretation.contains("Weak")
-        || fundamental.balance_sheet.interpretation.contains("Risky")
-        || fundamental.cash_flow.interpretation.contains("Weak");
-
-    let peer_value_read = if peer_interp.contains("Cheap") && value_trap {
-        "Possible value trap: cheap vs peers but weak growth, balance sheet, or cash conversion."
+    let value_trap = if company_type.is_lender() {
+        false
     } else {
-        peer_interp.as_str()
-    }
-    .to_string();
+        fundamental.growth.interpretation.contains("Weak")
+            || fundamental.balance_sheet.interpretation.contains("Risky")
+            || fundamental.cash_flow.interpretation.contains("Weak")
+    };
 
+    let peer_value_read = if company_type.is_lender() {
+        pb_roe_interpretation(financials.return_on_equity, cur_pb)
+    } else if peer_interp.contains("Cheap") && value_trap {
+        "Possible value trap: cheap vs peers but weak growth, balance sheet, or cash conversion.".to_string()
+    } else {
+        peer_interp.clone()
+    };
+
+    let fy_pat_growth_dec = {
+        let mut inc = bundle.income_annual.clone();
+        inc.sort_by_key(|r| r.end_ts.unwrap_or(0));
+        let levels: Vec<f64> = inc.iter().map(|r| r.net_income).collect();
+        crate::series_integrity::fy_yoy_pct(&levels)
+            .filter(|_| crate::series_integrity::latest_step_usable(&levels, None))
+            .map(|x| x / 100.0)
+    };
     let peg = {
         let pe = financials.pe_ratio;
-        let g = financials.earnings_growth;
-        if pe > 0.0 && g > 0.0 {
-            Some(pe / (g * 100.0))
-        } else {
-            None
+        match fy_pat_growth_dec {
+            Some(g) if pe > 0.0 && g > 0.0 => Some(pe / (g * 100.0)),
+            _ => None,
         }
     };
 
-    let ev = financials.enterprise_value;
-    let ev_ebitda = if ev > 0.0 && financials.ebitda > 0.0 {
-        Some(ev / financials.ebitda)
+    let calculated_ev = crate::yahoo_metrics::resolve_enterprise_value(
+        None,
+        financials.market_cap,
+        financials.total_debt,
+        financials.total_cash,
+    );
+    let calculated_ev_ebitda = if company_type.is_lender() {
+        None
     } else {
-        subject.ev_to_ebitda
+        crate::yahoo_metrics::ev_to_ebitda(calculated_ev, financials.ebitda)
     };
-    let ev_sales = if ev > 0.0 && financials.revenue > 0.0 {
-        Some(ev / financials.revenue)
+    let yahoo_ev_ebitda = if company_type.is_lender() {
+        None
     } else {
-        subject.ev_to_sales
+        financials.yahoo_ev_to_ebitda
+    };
+    let ev_ebitda = if company_type.is_lender() {
+        None
+    } else {
+        yahoo_ev_ebitda.or(calculated_ev_ebitda).or(subject.ev_to_ebitda)
+    };
+    let ev_note = if company_type.is_lender() {
+        "EV/EBITDA and EV/Sales are not used for banks/NBFCs — prefer P/B, P/E and ROE.".to_string()
+    } else if yahoo_ev_ebitda.is_some() {
+        "Yahoo EV/EBITDA from quote statistics (enterpriseToEbitda). Distinct from statement-cash EV.".to_string()
+    } else if calculated_ev_ebitda.is_some() {
+        "Calculated EV/EBITDA = (market cap + debt − Yahoo totalCash) / EBITDA. Not Yahoo page EV/EBITDA.".to_string()
+    } else {
+        String::new()
+    };
+    let ev = crate::yahoo_metrics::resolve_enterprise_value(
+        financials.enterprise_value,
+        financials.market_cap,
+        financials.total_debt,
+        financials.total_cash,
+    );
+    let ev_sales = if company_type.is_lender() {
+        None
+    } else {
+        crate::yahoo_metrics::ev_to_sales(ev, financials.revenue).or(subject.ev_to_sales)
     };
 
     let mcap_sales = if financials.market_cap > 0.0 && financials.revenue > 0.0 {
@@ -234,22 +316,25 @@ pub fn build_valuation_analysis(
         None
     };
 
-    let earn_y = if price > 0.0 && financials.trailing_eps > 0.0 {
-        Some((financials.trailing_eps / price) * 100.0)
-    } else if cur_pe > 0.0 {
-        Some(100.0 / cur_pe)
-    } else {
-        None
-    };
+    let earn_y = crate::yahoo_metrics::earnings_yield_eps_pct(
+        price,
+        financials.trailing_eps,
+        financials.pe_ratio,
+    );
 
-    let fcf_y = if financials.market_cap > 0.0 {
-        Some((financials.free_cashflow / financials.market_cap) * 100.0)
-    } else {
+    let statement_fcf = if company_type.is_lender() {
         None
+    } else {
+        crate::yahoo_metrics::report_fcf(financials.free_cashflow, bundle)
+    };
+    let fcf_y = if company_type.is_lender() {
+        None
+    } else {
+        crate::yahoo_metrics::fcf_yield_pct(statement_fcf, financials.market_cap)
     };
 
     let fair_pe = med_pe_5.or(med_pe_3).unwrap_or(18.0).clamp(8.0, 45.0);
-    let g = financials.earnings_growth.max(0.03).min(0.35);
+    let g = fy_pat_growth_dec.unwrap_or(0.03).max(0.03).min(0.35);
     let eps = financials.trailing_eps;
     let mos = 0.15_f64;
     let base_fv = if eps > 0.0 {
@@ -284,18 +369,53 @@ pub fn build_valuation_analysis(
         bull_value: bull,
         base_value: base_fv,
         bear_value: bear,
+        is_model_assumption: true,
+        assumption_note: if company_type.is_lender() {
+            format!(
+                "Model assumption, not a yfinance fact: fair P/E {:.1}× × trailing EPS (then {:.0}% haircut). Not a buy target when lender filing coverage is incomplete.",
+                fair_pe,
+                mos * 100.0
+            )
+        } else {
+            "Heuristic: fair P/E × trailing EPS with a margin-of-safety haircut — not a market quote.".to_string()
+        },
     };
 
     let valuation_label = {
-        let cheap_hist = hist_class.contains("Cheap") || hist_class.contains("Fair") && cur_pe > 0.0 && med_pe_5.map(|m| cur_pe < m * 0.85).unwrap_or(false);
+        let cheap_hist = hist_class.contains("Cheap")
+            || (hist_class.contains("Fair") && cur_pe > 0.0 && med_pe_5.map(|m| cur_pe < m * 0.85).unwrap_or(false));
+        let cheap_pb = company_type.is_lender()
+            && cur_pb > 0.0
+            && med_pb_5.or(med_pb_3).map(|m| cur_pb < m * 0.9).unwrap_or(cur_pb <= 1.1);
         let exp_hist = hist_class.contains("Very expensive") || hist_class.contains("Expensive");
-        let exp_peer = m_pe.map(|m| cur_pe > m * 1.2).unwrap_or(false);
-        let cheap_peer = m_pe.map(|m| cur_pe > 0.0 && cur_pe < m * 0.8).unwrap_or(false);
+        let exp_peer = m_pe.map(|m| cur_pe > m * 1.2).unwrap_or(false)
+            && !peer_comparability.eq_ignore_ascii_case("low");
+        let cheap_peer = m_pe.map(|m| cur_pe > 0.0 && cur_pe < m * 0.8).unwrap_or(false)
+            && !peer_comparability.eq_ignore_ascii_case("low");
         let qual_ok = !fundamental.profitability.interpretation.contains("Poor")
             && !fundamental.balance_sheet.interpretation.contains("Risky");
+        let incomplete_kind = if company_type.is_bank() {
+            "bank-specific quality data"
+        } else {
+            "lender quality data"
+        };
 
-        if value_trap && cheap_peer {
+        if coverage_gated && company_type.is_lender() {
+            let fair_hist = hist_class.contains("Fair vs historical");
+            let pe_mid = cur_pe >= 15.0 && cur_pe <= 25.0;
+            if exp_hist || exp_peer {
+                format!("Apparently expensive — incomplete {incomplete_kind}")
+            } else if fair_hist || (pe_mid && !cheap_peer && !cheap_pb) {
+                format!("Fair / potentially reasonable — incomplete {incomplete_kind}")
+            } else if cheap_hist || cheap_peer || cheap_pb || (cur_pe > 0.0 && cur_pe < 15.0) {
+                format!("Apparently inexpensive — incomplete {incomplete_kind}")
+            } else {
+                format!("Incomplete {incomplete_kind} — not a value call")
+            }
+        } else if value_trap && cheap_peer {
             "Avoid / Possible Value Trap".to_string()
+        } else if company_type.is_lender() && (cheap_hist || cheap_pb || cheap_peer) {
+            "Apparently inexpensive".to_string()
         } else if cheap_hist && cheap_peer && qual_ok {
             "Very Cheap".to_string()
         } else if cheap_hist || cheap_peer {
@@ -324,6 +444,9 @@ pub fn build_valuation_analysis(
         price_to_book: cur_pb,
         price_to_sales: financials.price_to_sales,
         ev_to_ebitda: ev_ebitda,
+        yahoo_ev_to_ebitda: yahoo_ev_ebitda,
+        calculated_ev_to_ebitda: calculated_ev_ebitda,
+        ev_to_ebitda_note: ev_note,
         ev_to_sales: ev_sales,
         peg_ratio: peg,
         dividend_yield: financials.dividend_yield,
@@ -354,5 +477,11 @@ pub fn build_valuation_analysis(
         valuation_label,
         peer_value_read,
         confidence: conf,
+        pb_roe_interpretation: if company_type.is_lender() {
+            pb_roe_interpretation(financials.return_on_equity, cur_pb)
+        } else {
+            String::new()
+        },
+        lender_valuation: company_type.is_lender(),
     }
 }

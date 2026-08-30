@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use tokio::sync::Notify;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -240,6 +240,148 @@ pub async fn backfill_all(pool: &SqlitePool, cfg: &RefreshConfig) -> Result<Back
         }
     }
     Ok(BackfillStats { refreshed, errors })
+}
+
+/// Result of a focused sector backfill run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SectorBackfillStats {
+    /// Symbols that were missing a sector at the start of the run.
+    pub scanned: u64,
+    /// Symbols that got a sector (and possibly industry/name) written.
+    pub filled: u64,
+    /// Symbols still missing a sector after the run (Yahoo has no data).
+    pub still_missing: u64,
+    /// Fetch/DB errors encountered.
+    pub errors: u64,
+}
+
+/// Symbols currently lacking a sector label (NULL or blank).
+pub async fn symbols_missing_sector(pool: &SqlitePool) -> Result<Vec<String>> {
+    let rows = sqlx::query(
+        "SELECT symbol FROM symbols \
+         WHERE sector IS NULL OR TRIM(sector) = '' \
+         ORDER BY tier, symbol",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| r.try_get::<String, _>("symbol").ok())
+        .collect())
+}
+
+/// The dual-listed twin ticker (`.NS` <-> `.BO`) for a Yahoo symbol, if any.
+fn dual_listed_twin(symbol: &str) -> Option<String> {
+    if let Some(base) = symbol.strip_suffix(".NS") {
+        Some(format!("{base}.BO"))
+    } else {
+        symbol.strip_suffix(".BO").map(|base| format!("{base}.NS"))
+    }
+}
+
+/// Backfill sector/industry for every symbol missing a sector, fetching only the
+/// lightweight Yahoo asset profile (no financials/statements/chart). When the
+/// symbol itself has no sector on Yahoo, the dual-listed twin (`.NS`/`.BO`) is
+/// tried, since Yahoo's NSE coverage is generally better than BSE.
+pub async fn backfill_sectors(pool: &SqlitePool, cfg: &RefreshConfig) -> Result<SectorBackfillStats> {
+    let symbols = symbols_missing_sector(pool).await?;
+    let mut stats = SectorBackfillStats {
+        scanned: symbols.len() as u64,
+        filled: 0,
+        still_missing: 0,
+        errors: 0,
+    };
+    let mut burst = 0u32;
+    for symbol in symbols {
+        match backfill_one_sector(pool, &symbol).await {
+            Ok(true) => stats.filled += 1,
+            Ok(false) => stats.still_missing += 1,
+            Err(e) => {
+                log::warn!("sector backfill {symbol}: {e}");
+                stats.errors += 1;
+            }
+        }
+        burst = burst.saturating_add(1);
+        if cfg.burst_pause_every_n > 0 && burst >= cfg.burst_pause_every_n {
+            burst = 0;
+            sleep(Duration::from_millis(cfg.burst_pause_ms)).await;
+        } else {
+            sleep(Duration::from_millis(cfg.pacing_ms)).await;
+        }
+    }
+    Ok(stats)
+}
+
+/// Fetch the asset profile for one symbol (and its twin as a fallback) and write
+/// any sector/industry/name it yields. Returns `Ok(true)` when a sector was stored.
+async fn backfill_one_sector(pool: &SqlitePool, symbol: &str) -> Result<bool> {
+    let mut profile = fetch_asset_profile(symbol).await;
+    // A "Not Found" quote yields an empty profile (no identifying fields). In that
+    // case the dual-listed twin is almost always missing too, so skip it to avoid
+    // a second wasted request + error log.
+    let primary_quote_exists = profile.long_name.is_some()
+        || profile.industry.is_some()
+        || profile.website.is_some()
+        || profile.country.is_some()
+        || profile.currency.is_some();
+    if primary_quote_exists
+        && profile.sector.as_deref().map(str::trim).unwrap_or("").is_empty()
+    {
+        if let Some(twin) = dual_listed_twin(symbol) {
+            let twin_profile = fetch_asset_profile(&twin).await;
+            if !twin_profile
+                .sector
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                // Keep the original symbol's identity but adopt the twin's classification.
+                profile.sector = twin_profile.sector;
+                if profile.industry.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    profile.industry = twin_profile.industry;
+                }
+                if profile.long_name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    profile.long_name = twin_profile.long_name;
+                }
+            }
+        }
+    }
+
+    let sector = profile
+        .sector
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if sector.is_none() {
+        return Ok(false);
+    }
+
+    let industry = profile
+        .industry
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let short_name = profile
+        .long_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    SymbolRow {
+        symbol: symbol.to_string(),
+        short_name,
+        sector,
+        industry,
+        tier: tier_for_symbol(symbol),
+        ..Default::default()
+    }
+    .upsert_identity(pool)
+    .await?;
+    Ok(true)
 }
 
 async fn sleep_or_kick(cancel: &CancellationToken, kick: &Notify, dur: Duration) {
