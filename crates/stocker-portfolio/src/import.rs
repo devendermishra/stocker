@@ -539,7 +539,8 @@ pub fn preview_rows_with_index(
     if uses_multi_section_import(grid) {
         return preview_rows_multi_section(portfolio_id, grid, &resolver);
     }
-    grid.rows
+    let mut rows: Vec<ImportRowPreview> = grid
+        .rows
         .iter()
         .enumerate()
         .skip(header_row + 1)
@@ -558,7 +559,9 @@ pub fn preview_rows_with_index(
                 },
             }
         })
-        .collect()
+        .collect();
+    infer_bonus_ratios_in_preview(&mut rows);
+    rows
 }
 
 fn preview_rows_multi_section(
@@ -592,6 +595,7 @@ fn preview_rows_multi_section(
             }),
         }
     }
+    infer_bonus_ratios_in_preview(&mut results);
     results
 }
 
@@ -854,6 +858,176 @@ fn infer_split_ratio(
     Ok(())
 }
 
+fn parse_colon_or_slash_ratio(raw: Option<&str>) -> Option<(f64, f64)> {
+    let raw = raw?;
+    if !(raw.contains(':') || raw.contains('/')) {
+        return None;
+    }
+    parse_ratio_pair(raw)
+}
+
+fn clear_bonus_trade_amounts(input: &mut NewTransaction) {
+    input.quantity = None;
+    input.price = None;
+    input.gross_amount = None;
+    input.net_amount = None;
+    input.brokerage = None;
+    input.taxes = None;
+}
+
+fn infer_bonus_ratio(
+    input: &mut NewTransaction,
+    quantity_raw: Option<&str>,
+    notes_raw: Option<&str>,
+) -> Result<()> {
+    if input.bonus_ratio_num.filter(|n| *n > 0.0).is_some() {
+        if input.bonus_ratio_den.filter(|d| *d > 0.0).is_none() {
+            input.bonus_ratio_den = Some(1.0);
+        }
+        clear_bonus_trade_amounts(input);
+        return Ok(());
+    }
+
+    if let Some((num, den)) = parse_colon_or_slash_ratio(notes_raw)
+        .or_else(|| parse_colon_or_slash_ratio(quantity_raw))
+    {
+        input.bonus_ratio_num = Some(num);
+        input.bonus_ratio_den = Some(den);
+        clear_bonus_trade_amounts(input);
+        return Ok(());
+    }
+
+    let qty = input
+        .quantity
+        .filter(|q| *q > 0.0)
+        .or_else(|| input.eligible_quantity.filter(|q| *q > 0.0));
+    if qty.is_some() {
+        // Keep as Bonus with quantity; a later pass infers ratio from shares held.
+        input.price = None;
+        input.gross_amount = None;
+        input.net_amount = None;
+        input.brokerage = None;
+        input.taxes = None;
+        if input.quantity.is_none() {
+            input.quantity = qty;
+        }
+        return Ok(());
+    }
+
+    Err(Error::InvalidInput(
+        "bonus requires quantity or bonus ratio columns".into(),
+    ))
+}
+
+fn apply_qty_to_holding(held: f64, txn: &NewTransaction) -> f64 {
+    match txn.txn_type {
+        TransactionType::OpeningBalance
+        | TransactionType::Buy
+        | TransactionType::MergerInvestment
+        | TransactionType::DemergerInvestment
+        | TransactionType::Rights => held + txn.quantity.filter(|q| *q > 0.0).unwrap_or(0.0),
+        TransactionType::Sell
+        | TransactionType::MergerRedemption
+        | TransactionType::DemergerRedemption => {
+            (held - txn.quantity.unwrap_or(0.0).abs()).max(0.0)
+        }
+        TransactionType::Split => {
+            let num = txn
+                .split_ratio_num
+                .filter(|n| *n > 0.0)
+                .or(txn.quantity.filter(|q| *q > 0.0))
+                .unwrap_or(1.0);
+            let den = txn.split_ratio_den.filter(|d| *d > 0.0).unwrap_or(1.0);
+            held * (num / den)
+        }
+        TransactionType::Bonus => {
+            if let (Some(num), Some(den)) = (
+                txn.bonus_ratio_num.filter(|n| *n > 0.0),
+                txn.bonus_ratio_den.filter(|d| *d > 0.0),
+            ) {
+                held * (1.0 + num / den)
+            } else {
+                held + txn.quantity.filter(|q| *q > 0.0).unwrap_or(0.0)
+            }
+        }
+        TransactionType::Dividend | TransactionType::Sip | TransactionType::Swp => held,
+    }
+}
+
+/// Last-resort fallback: broker bonus shares with no held quantity to infer a ratio.
+fn fallback_bonus_to_zero_cost_buy(input: &mut NewTransaction) {
+    let qty = input
+        .quantity
+        .filter(|q| *q > 0.0)
+        .or_else(|| input.eligible_quantity.filter(|q| *q > 0.0));
+    let Some(qty) = qty else {
+        return;
+    };
+    input.txn_type = TransactionType::Buy;
+    input.quantity = Some(qty);
+    input.price = Some(0.0);
+    input.gross_amount = Some(0.0);
+    input.net_amount = Some(0.0);
+    input.bonus_ratio_num = None;
+    input.bonus_ratio_den = None;
+}
+
+/// Infer bonus ratios from shares received vs quantity already held (same file, date order).
+/// When held qty is unknown, rewrite qty-only bonus as a zero-cost buy.
+pub fn infer_bonus_ratios_from_holdings(txns: &mut [NewTransaction]) {
+    let mut order: Vec<usize> = (0..txns.len()).collect();
+    order.sort_by(|&a, &b| {
+        txns[a]
+            .trade_date
+            .cmp(&txns[b].trade_date)
+            .then_with(|| {
+                import_txn_sort_key(txns[a].txn_type).cmp(&import_txn_sort_key(txns[b].txn_type))
+            })
+            .then_with(|| a.cmp(&b))
+    });
+
+    let mut held: HashMap<String, f64> = HashMap::new();
+    for idx in order {
+        let sym = txns[idx].symbol.clone().unwrap_or_default();
+        if txns[idx].txn_type == TransactionType::Bonus
+            && txns[idx].bonus_ratio_num.filter(|n| *n > 0.0).is_none()
+        {
+            let received = txns[idx]
+                .quantity
+                .filter(|q| *q > 0.0)
+                .or_else(|| txns[idx].eligible_quantity.filter(|q| *q > 0.0));
+            let prior = held.get(&sym).copied().unwrap_or(0.0);
+            if let Some(received) = received {
+                if prior > 1e-9 {
+                    let (num, den) = simplify_ratio(received, prior);
+                    txns[idx].bonus_ratio_num = Some(num);
+                    txns[idx].bonus_ratio_den = Some(den);
+                    clear_bonus_trade_amounts(&mut txns[idx]);
+                } else {
+                    fallback_bonus_to_zero_cost_buy(&mut txns[idx]);
+                }
+            }
+        }
+        let next = apply_qty_to_holding(held.get(&sym).copied().unwrap_or(0.0), &txns[idx]);
+        held.insert(sym, next);
+    }
+}
+
+fn infer_bonus_ratios_in_preview(rows: &mut [ImportRowPreview]) {
+    let mut idxs = Vec::new();
+    let mut txns = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        if let Some(txn) = &row.transaction {
+            idxs.push(i);
+            txns.push(txn.clone());
+        }
+    }
+    infer_bonus_ratios_from_holdings(&mut txns);
+    for (i, txn) in idxs.into_iter().zip(txns) {
+        rows[i].transaction = Some(txn);
+    }
+}
+
 /// Normalize broker-export rows: prefer Units × NAV, abs redemption amounts, infer missing qty.
 fn finalize_import_transaction(
     input: &mut NewTransaction,
@@ -890,24 +1064,7 @@ fn finalize_import_transaction(
             input.price = None;
         }
         TransactionType::Bonus => {
-            if input.bonus_ratio_num.filter(|n| *n > 0.0).is_none() {
-                let qty = input
-                    .quantity
-                    .filter(|q| *q > 0.0)
-                    .or_else(|| input.eligible_quantity.filter(|q| *q > 0.0));
-                if let Some(qty) = qty {
-                    // Broker bonus lines list shares received — record as zero-cost buy.
-                    input.txn_type = TransactionType::Buy;
-                    input.quantity = Some(qty);
-                    input.price = Some(0.0);
-                    input.gross_amount = Some(0.0);
-                    input.net_amount = Some(0.0);
-                } else {
-                    return Err(Error::InvalidInput(
-                        "bonus requires quantity or bonus ratio columns".into(),
-                    ));
-                }
-            }
+            infer_bonus_ratio(input, quantity_raw, notes_raw)?;
         }
         TransactionType::Split => {
             infer_split_ratio(input, txn_type_raw, quantity_raw, price_raw, notes_raw)?;
@@ -1088,6 +1245,7 @@ pub async fn bulk_import_with_mf(
 ) -> Result<ImportResult> {
     let _ = portfolios::get(pool, user_id, portfolio_id).await?;
     sort_transactions_for_import(&mut transactions);
+    infer_bonus_ratios_from_holdings(&mut transactions);
     let mut imported = 0usize;
     let mut skipped = 0usize;
     let mut errors = Vec::new();
@@ -1258,6 +1416,70 @@ mod tests {
         assert_eq!(parse_ratio_pair("5:1"), Some((5.0, 1.0)));
         assert_eq!(parse_ratio_pair("1/5"), Some((1.0, 5.0)));
         assert_eq!(parse_ratio_pair("5"), Some((5.0, 1.0)));
+    }
+
+    fn blank_txn(txn_type: TransactionType, date: &str, symbol: &str) -> NewTransaction {
+        NewTransaction {
+            portfolio_id: 1,
+            txn_type,
+            trade_date: date.into(),
+            symbol: Some(symbol.into()),
+            quantity: None,
+            price: None,
+            gross_amount: None,
+            brokerage: None,
+            taxes: None,
+            net_amount: None,
+            split_ratio_num: None,
+            split_ratio_den: None,
+            bonus_ratio_num: None,
+            bonus_ratio_den: None,
+            dividend_per_share: None,
+            tds: None,
+            eligible_quantity: None,
+            notes: None,
+            schedule_id: None,
+        }
+    }
+
+    #[test]
+    fn bonus_import_infers_ratio_from_held_qty() {
+        let mut buy = blank_txn(TransactionType::Buy, "2024-01-01", "ITC.NS");
+        buy.quantity = Some(100.0);
+        buy.price = Some(500.0);
+        buy.net_amount = Some(50000.0);
+        let mut bonus = blank_txn(TransactionType::Bonus, "2024-06-01", "ITC.NS");
+        bonus.quantity = Some(20.0);
+        let mut txns = vec![buy, bonus];
+        infer_bonus_ratios_from_holdings(&mut txns);
+        assert_eq!(txns[1].txn_type, TransactionType::Bonus);
+        assert_eq!(txns[1].bonus_ratio_num, Some(1.0));
+        assert_eq!(txns[1].bonus_ratio_den, Some(5.0));
+        assert!(txns[1].quantity.is_none());
+    }
+
+    #[test]
+    fn bonus_import_falls_back_to_zero_cost_buy_without_holdings() {
+        let mut bonus = blank_txn(TransactionType::Bonus, "2025-05-23", "BSE.NS");
+        bonus.quantity = Some(1.0);
+        let mut txns = vec![bonus];
+        infer_bonus_ratios_from_holdings(&mut txns);
+        assert_eq!(txns[0].txn_type, TransactionType::Buy);
+        assert_eq!(txns[0].quantity, Some(1.0));
+        assert_eq!(txns[0].price, Some(0.0));
+        assert_eq!(txns[0].net_amount, Some(0.0));
+    }
+
+    #[test]
+    fn bonus_import_uses_ratio_from_notes() {
+        let mut input = blank_txn(TransactionType::Bonus, "2024-06-01", "ITC.NS");
+        input.quantity = Some(100.0);
+        finalize_import_transaction(&mut input, Some("Bonus"), Some("100"), None, Some("1:1"))
+            .unwrap();
+        assert_eq!(input.txn_type, TransactionType::Bonus);
+        assert_eq!(input.bonus_ratio_num, Some(1.0));
+        assert_eq!(input.bonus_ratio_den, Some(1.0));
+        assert!(input.quantity.is_none());
     }
 
     #[test]

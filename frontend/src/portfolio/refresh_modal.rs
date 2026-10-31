@@ -90,7 +90,7 @@ pub fn PortfolioRefreshModal(
 
                     RefreshSection {
                         title: "Corporate actions (dividends & splits)".to_string(),
-                        note: Some("Bonus shares cannot be auto-detected; add them manually via Add transaction.".to_string()),
+                        note: Some("Yahoo reports many Indian bonuses as splits (same qty/avg effect). Events are scanned from your first buy, including names you have since sold. A split is skipped if a bonus on that date already applies the same multiplier. Ratio-only bonuses with no Yahoo event still need a manual Bonus transaction.".to_string()),
                         empty: "No missing dividends or splits detected.".to_string(),
                         has_items: !data.corporate_actions.is_empty(),
                         children: rsx! {
@@ -136,7 +136,7 @@ pub fn PortfolioRefreshModal(
                                                         {
                                                             let num = item.split_ratio_num.unwrap_or(0.0);
                                                             let den = item.split_ratio_den.unwrap_or(1.0);
-                                                            format!("Ratio {num}:{den}")
+                                                            format!("New:old {num}:{den} (qty × {:.4})", num / den.max(1e-12))
                                                         }
                                                     }
                                                 }

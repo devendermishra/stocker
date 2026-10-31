@@ -310,7 +310,7 @@ pub fn validate_new(input: &NewTransaction) -> Result<()> {
             return Err(Error::InvalidInput("quantity must be positive".into()));
         }
     }
-    if input.txn_type == TransactionType::Sip || input.txn_type == TransactionType::Swp {
+        if input.txn_type == TransactionType::Sip || input.txn_type == TransactionType::Swp {
         let amount = input
             .net_amount
             .or(input.gross_amount)
@@ -321,6 +321,28 @@ pub fn validate_new(input: &NewTransaction) -> Result<()> {
                 input.txn_type.as_str()
             )));
         }
+    }
+    match input.txn_type {
+        TransactionType::Split => {
+            let has_ratio = input.split_ratio_num.filter(|n| *n > 0.0).is_some();
+            let has_qty = input.quantity.filter(|q| *q > 0.0).is_some();
+            if !has_ratio && !has_qty {
+                return Err(Error::InvalidInput(
+                    "split requires split_ratio_num (or quantity as multiplier)".into(),
+                ));
+            }
+        }
+        TransactionType::Bonus => {
+            let has_ratio = input.bonus_ratio_num.filter(|n| *n > 0.0).is_some()
+                && input.bonus_ratio_den.filter(|d| *d > 0.0).is_some();
+            let has_qty = input.quantity.filter(|q| *q > 0.0).is_some();
+            if !has_ratio && !has_qty {
+                return Err(Error::InvalidInput(
+                    "bonus requires bonus ratio or quantity".into(),
+                ));
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -516,6 +538,51 @@ mod tests {
         normalize_trade_amounts(&mut input);
         assert_eq!(input.net_amount, Some(1000.0));
         assert_eq!(input.gross_amount, Some(1000.0));
+    }
+
+    fn blank_txn(txn_type: TransactionType) -> NewTransaction {
+        NewTransaction {
+            portfolio_id: 1,
+            txn_type,
+            trade_date: "2024-01-01".into(),
+            symbol: Some("ITC.NS".into()),
+            quantity: None,
+            price: None,
+            gross_amount: None,
+            brokerage: None,
+            taxes: None,
+            net_amount: None,
+            split_ratio_num: None,
+            split_ratio_den: None,
+            bonus_ratio_num: None,
+            bonus_ratio_den: None,
+            dividend_per_share: None,
+            tds: None,
+            eligible_quantity: None,
+            notes: None,
+            schedule_id: None,
+        }
+    }
+
+    #[test]
+    fn validate_new_requires_split_ratio_or_quantity() {
+        let mut split = blank_txn(TransactionType::Split);
+        assert!(validate_new(&split).is_err());
+        split.split_ratio_num = Some(5.0);
+        split.split_ratio_den = Some(1.0);
+        assert!(validate_new(&split).is_ok());
+        let mut qty_only = blank_txn(TransactionType::Split);
+        qty_only.quantity = Some(5.0);
+        assert!(validate_new(&qty_only).is_ok());
+    }
+
+    #[test]
+    fn validate_new_requires_bonus_ratio_or_quantity() {
+        let mut bonus = blank_txn(TransactionType::Bonus);
+        assert!(validate_new(&bonus).is_err());
+        bonus.bonus_ratio_num = Some(1.0);
+        bonus.bonus_ratio_den = Some(5.0);
+        assert!(validate_new(&bonus).is_ok());
     }
 
     #[tokio::test]

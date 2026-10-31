@@ -796,6 +796,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bonus_one_for_five_scales_quantity() {
+        let pool = db::open_memory().await.unwrap();
+        let (user_id, portfolio_id) = setup_portfolio(&pool).await;
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::Buy,
+                trade_date: "2024-01-01".into(),
+                symbol: Some("ITC.NS".into()),
+                quantity: Some(100.0),
+                price: Some(500.0),
+                gross_amount: Some(50000.0),
+                brokerage: None,
+                taxes: None,
+                net_amount: Some(50000.0),
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: None,
+                bonus_ratio_den: None,
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+                schedule_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        transactions::create(
+            &pool,
+            user_id,
+            &NewTransaction {
+                portfolio_id,
+                txn_type: TransactionType::Bonus,
+                trade_date: "2024-06-01".into(),
+                symbol: Some("ITC.NS".into()),
+                quantity: None,
+                price: None,
+                gross_amount: None,
+                brokerage: None,
+                taxes: None,
+                net_amount: None,
+                split_ratio_num: None,
+                split_ratio_den: None,
+                bonus_ratio_num: Some(1.0),
+                bonus_ratio_den: Some(5.0),
+                dividend_per_share: None,
+                tds: None,
+                eligible_quantity: None,
+                notes: None,
+                schedule_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = rebuild(&pool, portfolio_id).await.unwrap();
+        let stats = result.symbols.get("ITC.NS").unwrap();
+        assert!((stats.quantity - 120.0).abs() < 1e-6);
+        assert!((stats.total_cost - 50000.0).abs() < 1e-6);
+        let avg = stats.total_cost / stats.quantity;
+        assert!((avg - 50000.0 / 120.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
     async fn bonus_with_quantity_adds_zero_cost_lot() {
         let pool = db::open_memory().await.unwrap();
         let (user_id, portfolio_id) = setup_portfolio(&pool).await;
