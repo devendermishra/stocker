@@ -95,20 +95,17 @@ pub async fn scan_portfolio_refresh(
     user_id: i64,
     portfolio_id: i64,
 ) -> Result<PortfolioRefreshScan> {
-    let ledger = ensure_ledger(pool, portfolio_id, false).await?;
+    let _ledger = ensure_ledger(pool, portfolio_id, false).await?;
     let existing_keys = load_existing_corp_keys(pool, portfolio_id).await?;
     let symbol_txns = load_equity_transactions(pool, portfolio_id).await?;
 
     let mut corporate_actions = Vec::new();
 
-    for (symbol, stats) in &ledger.symbols {
+    for (symbol, txns) in &symbol_txns {
         if symbol.starts_with("MF:") {
             continue;
         }
-        if stats.quantity <= 1e-9 {
-            continue;
-        }
-        let Some(since) = stats.last_transaction_date.as_deref() else {
+        let Some(since) = txns.first().map(|t| t.trade_date.as_str()) else {
             continue;
         };
 
@@ -119,6 +116,10 @@ pub async fn scan_portfolio_refresh(
 
         for div in &events.dividends {
             if div.date.as_str() <= since {
+                continue;
+            }
+            let eligible_qty = holdings_qty_before_date(Some(txns.as_slice()), &div.date);
+            if eligible_qty <= 1e-9 {
                 continue;
             }
             let input = NewTransaction {
@@ -148,8 +149,6 @@ pub async fn scan_portfolio_refresh(
             if existing_keys.contains(&key) {
                 continue;
             }
-            let eligible_qty =
-                holdings_qty_at_date(symbol_txns.get(symbol), &div.date);
             let gross = div.amount * eligible_qty;
             corporate_actions.push(SuggestedCorporateAction {
                 suggestion_id: key.clone(),
@@ -166,6 +165,9 @@ pub async fn scan_portfolio_refresh(
 
         for split in &events.splits {
             if split.date.as_str() <= since {
+                continue;
+            }
+            if !should_suggest_split(txns.as_slice(), &split.date, split.numerator, split.denominator) {
                 continue;
             }
             let input = NewTransaction {
@@ -541,13 +543,29 @@ struct Lot {
     remaining_qty: f64,
 }
 
-fn holdings_qty_at_date(txns: Option<&Vec<Transaction>>, as_of_date: &str) -> f64 {
+fn holdings_qty_before_date(txns: Option<&[Transaction]>, as_of_date: &str) -> f64 {
+    holdings_qty_as_of(txns, as_of_date, false)
+}
+
+fn holdings_qty_at_date(txns: Option<&[Transaction]>, as_of_date: &str) -> f64 {
+    holdings_qty_as_of(txns, as_of_date, true)
+}
+
+fn holdings_qty_as_of(
+    txns: Option<&[Transaction]>,
+    as_of_date: &str,
+    include_as_of: bool,
+) -> f64 {
     let Some(txns) = txns else {
         return 0.0;
     };
     let mut lots: Vec<Lot> = Vec::new();
     for txn in txns {
-        if txn.trade_date.as_str() > as_of_date {
+        if include_as_of {
+            if txn.trade_date.as_str() > as_of_date {
+                break;
+            }
+        } else if txn.trade_date.as_str() >= as_of_date {
             break;
         }
         match txn.txn_type {
@@ -602,6 +620,62 @@ fn holdings_qty_at_date(txns: Option<&Vec<Transaction>>, as_of_date: &str) -> f6
         }
     }
     lots.iter().map(|l| l.remaining_qty).sum()
+}
+
+fn factors_equivalent(a: f64, b: f64) -> bool {
+    if !a.is_finite() || !b.is_finite() || a <= 0.0 || b <= 0.0 {
+        return false;
+    }
+    (a - b).abs() < 1e-6 || (a / b - 1.0).abs() < 1e-6
+}
+
+fn txn_adjustment_factor(txn: &Transaction, held_before: f64) -> Option<f64> {
+    match txn.txn_type {
+        TransactionType::Split => {
+            let num = txn
+                .split_ratio_num
+                .filter(|n| *n > 0.0)
+                .or(txn.quantity.filter(|q| *q > 0.0))?;
+            let den = txn.split_ratio_den.filter(|d| *d > 0.0).unwrap_or(1.0);
+            Some(num / den)
+        }
+        TransactionType::Bonus => {
+            if let (Some(num), Some(den)) = (txn.bonus_ratio_num, txn.bonus_ratio_den) {
+                if num > 0.0 && den > 0.0 {
+                    return Some(1.0 + num / den);
+                }
+            }
+            let received = txn.quantity.filter(|q| *q > 0.0)?;
+            if held_before > 1e-9 {
+                Some(1.0 + received / held_before)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Suggest a Yahoo split when shares were held on the ex-date and no existing
+/// split/bonus already applies the same quantity multiplier that day.
+fn should_suggest_split(txns: &[Transaction], event_date: &str, num: f64, den: f64) -> bool {
+    if num <= 0.0 || den <= 0.0 {
+        return false;
+    }
+    let held = holdings_qty_before_date(Some(txns), event_date);
+    if held <= 1e-9 {
+        return false;
+    }
+    let factor = num / den;
+    !has_equivalent_adjustment(txns, event_date, factor)
+}
+
+fn has_equivalent_adjustment(txns: &[Transaction], event_date: &str, factor: f64) -> bool {
+    let held_before = holdings_qty_before_date(Some(txns), event_date);
+    txns.iter()
+        .filter(|t| t.trade_date == event_date)
+        .filter_map(|t| txn_adjustment_factor(t, held_before))
+        .any(|existing| factors_equivalent(existing, factor))
 }
 
 async fn detect_missing_sip_installments(
@@ -1015,9 +1089,46 @@ mod tests {
             tx(1, TransactionType::Split, "2024-06-01", None, Some(2.0), Some(1.0)),
             tx(1, TransactionType::Sell, "2024-07-01", Some(5.0), None, None),
         ];
-        assert!((holdings_qty_at_date(Some(&txns), "2024-05-01") - 10.0).abs() < 1e-6);
-        assert!((holdings_qty_at_date(Some(&txns), "2024-06-15") - 20.0).abs() < 1e-6);
-        assert!((holdings_qty_at_date(Some(&txns), "2024-08-01") - 15.0).abs() < 1e-6);
+        assert!((holdings_qty_at_date(Some(txns.as_slice()), "2024-05-01") - 10.0).abs() < 1e-6);
+        assert!((holdings_qty_at_date(Some(txns.as_slice()), "2024-06-15") - 20.0).abs() < 1e-6);
+        assert!((holdings_qty_at_date(Some(txns.as_slice()), "2024-08-01") - 15.0).abs() < 1e-6);
+        assert!((holdings_qty_before_date(Some(txns.as_slice()), "2024-06-01") - 10.0).abs() < 1e-6);
+        assert!((holdings_qty_before_date(Some(txns.as_slice()), "2024-01-01") - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn should_suggest_split_between_buys_when_held_on_ex_date() {
+        let txns = vec![
+            tx(1, TransactionType::Buy, "2020-01-01", Some(10.0), None, None),
+            tx(1, TransactionType::Buy, "2024-01-01", Some(5.0), None, None),
+        ];
+        assert!(should_suggest_split(&txns, "2022-06-01", 2.0, 1.0));
+        assert!(!should_suggest_split(&txns, "2019-06-01", 2.0, 1.0));
+    }
+
+    #[test]
+    fn should_suggest_split_skips_when_not_held_on_ex_date() {
+        let txns = vec![
+            tx(1, TransactionType::Buy, "2020-01-01", Some(10.0), None, None),
+            tx(1, TransactionType::Sell, "2021-01-01", Some(10.0), None, None),
+            tx(1, TransactionType::Buy, "2024-01-01", Some(5.0), None, None),
+        ];
+        assert!(!should_suggest_split(&txns, "2022-06-01", 2.0, 1.0));
+        assert!(should_suggest_split(&txns, "2024-06-01", 2.0, 1.0));
+    }
+
+    #[test]
+    fn should_suggest_split_skips_equivalent_bonus() {
+        let mut bonus = tx(1, TransactionType::Bonus, "2022-06-01", None, None, None);
+        bonus.bonus_ratio_num = Some(1.0);
+        bonus.bonus_ratio_den = Some(1.0);
+        let txns = vec![
+            tx(1, TransactionType::Buy, "2020-01-01", Some(10.0), None, None),
+            bonus,
+            tx(1, TransactionType::Buy, "2024-01-01", Some(5.0), None, None),
+        ];
+        assert!(!should_suggest_split(&txns, "2022-06-01", 2.0, 1.0));
+        assert!(should_suggest_split(&txns, "2022-06-01", 5.0, 1.0));
     }
 
     #[test]

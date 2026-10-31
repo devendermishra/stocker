@@ -108,10 +108,24 @@ pub fn TransactionForm(
                     }
                 }
                 if txn_type() == TransactionType::Split {
-                    RatioFields { label_num: "Split num", label_den: "Split den", num: split_num, den: split_den }
+                    RatioFields {
+                        label_num: "New shares",
+                        label_den: "Old shares",
+                        helper: "1 old → 5 new is 5:1. Quantity × ratio; average cost ÷ ratio.",
+                        preview_kind: "split",
+                        num: split_num,
+                        den: split_den,
+                    }
                 }
                 if txn_type() == TransactionType::Bonus {
-                    RatioFields { label_num: "Bonus num", label_den: "Bonus den", num: bonus_num, den: bonus_den }
+                    RatioFields {
+                        label_num: "Free shares",
+                        label_den: "Held shares",
+                        helper: "1:1 doubles qty; 1:5 adds 1 per 5 held. Total cost unchanged.",
+                        preview_kind: "bonus",
+                        num: bonus_num,
+                        den: bonus_den,
+                    }
                 }
                 if txn_type() == TransactionType::Dividend {
                     label { "Dividend/share"
@@ -318,9 +332,12 @@ fn TradeAmountFields(
 fn RatioFields(
     label_num: &'static str,
     label_den: &'static str,
+    helper: &'static str,
+    preview_kind: &'static str,
     mut num: Signal<String>,
     mut den: Signal<String>,
 ) -> Element {
+    let preview = ratio_preview(preview_kind, &num(), &den());
     rsx! {
         label { "{label_num}"
             input { style: "{INPUT}", value: "{num}", oninput: move |ev| num.set(ev.value()) }
@@ -328,6 +345,33 @@ fn RatioFields(
         label { "{label_den}"
             input { style: "{INPUT}", value: "{den}", oninput: move |ev| den.set(ev.value()) }
         }
+        p { style: "grid-column: 1 / -1; margin: 0; font-size: 0.82rem; color: #555;",
+            "{helper}"
+        }
+        if let Some(preview) = preview {
+            p { style: "grid-column: 1 / -1; margin: 0; font-size: 0.82rem; color: #166534;",
+                "{preview}"
+            }
+        }
+    }
+}
+
+fn ratio_preview(kind: &str, num: &str, den: &str) -> Option<String> {
+    let n: f64 = num.trim().parse().ok()?;
+    let d: f64 = den.trim().parse().ok()?;
+    if n <= 0.0 || d <= 0.0 {
+        return None;
+    }
+    if kind == "split" {
+        let factor = n / d;
+        Some(format!(
+            "Preview: quantity × {factor:.4}, average cost ÷ {factor:.4}"
+        ))
+    } else {
+        let factor = 1.0 + n / d;
+        Some(format!(
+            "Preview: quantity × {factor:.4} (adds {n} per {d} held)"
+        ))
     }
 }
 
