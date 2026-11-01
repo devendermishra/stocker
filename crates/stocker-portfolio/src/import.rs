@@ -8,12 +8,14 @@ use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use stocker_core::symbol::{default_india_symbol_context, resolve_india_symbol, IndiaSymbolContext};
-use stocker_mf::{load_scheme_index_from_file, default_scheme_list_cache_path, is_mutual_fund_symbol, MfService, SchemeIndex};
+use stocker_core::default_india_symbol_context;
+use stocker_domain::symbol::{resolve_india_symbol, IndiaSymbolContext};
+use stocker_domain::mf::{is_mutual_fund_symbol, mf_symbol};
+use stocker_mf::{load_scheme_index_from_file, default_scheme_list_cache_path, MfService, SchemeIndex};
 
 use crate::engine::rebuild;
 use crate::error::{Error, Result};
-use crate::models::{NewTransaction, TransactionType};
+use stocker_domain::portfolio::models::{NewTransaction, TransactionType};
 use crate::portfolios;
 
 /// Mappable transaction field labels for the import wizard.
@@ -182,7 +184,7 @@ impl SymbolResolver {
                 return Ok(sym.clone());
             }
             if let Some(code) = self.mf_index.lookup_isin(&isin) {
-                return Ok(stocker_mf::mf_symbol(code));
+                return Ok(mf_symbol(code));
             }
         }
         if let Some(sym) = symbol.filter(|s| !s.trim().is_empty()) {
@@ -1886,7 +1888,7 @@ mod tests {
         use crate::auth::ensure_local_user;
         use crate::db;
         use crate::engine::rebuild;
-        use crate::models::NewPortfolio;
+        use stocker_domain::portfolio::models::NewPortfolio;
         use crate::portfolios;
         use crate::transactions;
 

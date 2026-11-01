@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::sectors_api::{PorterFiveForcesView, SectorResearchProfileView};
+use stocker_domain::{PorterFiveForces, SectorResearchProfile};
 
 pub const CARD: &str =
     "background: #fff; border: 1px solid #dfe3eb; border-radius: 12px; padding: 0.85rem;";
@@ -57,7 +57,7 @@ fn ForceCard(name: String, intensity: f64, label: String, narrative: String, evi
 }
 
 #[component]
-pub fn PorterForcesBlock(porter: PorterFiveForcesView) -> Element {
+pub fn PorterForcesBlock(porter: PorterFiveForces) -> Element {
     rsx! {
         div {
             ForceCard {
@@ -100,17 +100,17 @@ pub fn PorterForcesBlock(porter: PorterFiveForcesView) -> Element {
 }
 
 #[component]
-pub fn SectorResearchFull(profile: SectorResearchProfileView) -> Element {
+pub fn SectorResearchFull(profile: SectorResearchProfile) -> Element {
     let card = CARD;
     let b = badge_style();
-    let lifecycle = humanize_snake(&profile.lifecycle.phase);
-    let stype = humanize_snake(&profile.sector_type.sector_type);
-    let gap = humanize_snake(&profile.demand_supply.gap_label);
-    let comp = humanize_snake(&profile.competition.structure);
-    let profit = humanize_snake(&profile.profitability.level);
-    let growth = humanize_snake(&profile.growth_prospects.level);
-    let supplier = humanize_snake(&profile.pricing_power.supplier.level);
-    let customer = humanize_snake(&profile.pricing_power.customer.level);
+    let lifecycle = humanize_snake(profile.lifecycle.phase.as_str());
+    let stype = humanize_snake(profile.sector_type.sector_type.as_str());
+    let gap = humanize_snake(profile.demand_supply.gap_label.as_str());
+    let comp = humanize_snake(profile.competition.structure.as_str());
+    let profit = humanize_snake(profile.profitability.level.as_str());
+    let growth = humanize_snake(profile.growth_prospects.level.as_str());
+    let supplier = humanize_snake(profile.pricing_power.supplier.level.as_str());
+    let customer = humanize_snake(profile.pricing_power.customer.level.as_str());
     let growth_badge = format!("Growth: {growth}");
     let attract = profile.porter.attractiveness;
     let count = profile.company_count;
@@ -213,13 +213,13 @@ pub fn SectorResearchFull(profile: SectorResearchProfileView) -> Element {
 }
 
 #[component]
-pub fn SectorResearchCompact(profile: SectorResearchProfileView) -> Element {
+pub fn SectorResearchCompact(profile: SectorResearchProfile) -> Element {
     let b = badge_style();
-    let lifecycle = humanize_snake(&profile.lifecycle.phase);
-    let stype = humanize_snake(&profile.sector_type.sector_type);
-    let gap = humanize_snake(&profile.demand_supply.gap_label);
-    let supplier = humanize_snake(&profile.pricing_power.supplier.level);
-    let customer = humanize_snake(&profile.pricing_power.customer.level);
+    let lifecycle = humanize_snake(profile.lifecycle.phase.as_str());
+    let stype = humanize_snake(profile.sector_type.sector_type.as_str());
+    let gap = humanize_snake(profile.demand_supply.gap_label.as_str());
+    let supplier = humanize_snake(profile.pricing_power.supplier.level.as_str());
+    let customer = humanize_snake(profile.pricing_power.customer.level.as_str());
     let attract = profile.porter.attractiveness;
     let attract_badge = format!("Attractiveness {attract:.0}");
     let pricing_line = format!("Pricing — suppliers: {supplier}; customers: {customer}");

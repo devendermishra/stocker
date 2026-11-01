@@ -892,7 +892,7 @@ pub struct SectorAnalysisDetail {
 
 // --- Sector research (Porter, lifecycle, industry profile) ---
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PorterForce {
     pub name: String,
     /// 0–100; higher = more hostile / intense for incumbents
@@ -902,7 +902,7 @@ pub struct PorterForce {
     pub evidence: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PorterFiveForces {
     pub rivalry: PorterForce,
     pub new_entrants: PorterForce,
@@ -923,7 +923,18 @@ pub enum SectorLifecyclePhase {
     MaturityOrDecline,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl SectorLifecyclePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Growth => "growth",
+            Self::Consolidation => "consolidation",
+            Self::MaturityOrDecline => "maturity_or_decline",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SectorLifecycle {
     pub phase: SectorLifecyclePhase,
     pub narrative: String,
@@ -939,7 +950,18 @@ pub enum SectorTypeKind {
     CyclicalGrowth,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl SectorTypeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Growth => "growth",
+            Self::Cyclical => "cyclical",
+            Self::Defensive => "defensive",
+            Self::CyclicalGrowth => "cyclical_growth",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SectorTypeAssessment {
     pub sector_type: SectorTypeKind,
     pub narrative: String,
@@ -954,7 +976,17 @@ pub enum DemandSupplyGap {
     Oversupply,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl DemandSupplyGap {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shortage => "shortage",
+            Self::Balanced => "balanced",
+            Self::Oversupply => "oversupply",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct DemandSupplyAssessment {
     pub gap_label: DemandSupplyGap,
     pub intensity: f64,
@@ -970,7 +1002,17 @@ pub enum CompetitionStructure {
     Oligopolistic,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl CompetitionStructure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fragmented => "fragmented",
+            Self::ModeratelyConcentrated => "moderately_concentrated",
+            Self::Oligopolistic => "oligopolistic",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct CompetitionNature {
     pub structure: CompetitionStructure,
     pub narrative: String,
@@ -986,7 +1028,18 @@ pub enum ProfitabilityLevel {
     Mixed,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl ProfitabilityLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Moderate => "moderate",
+            Self::Low => "low",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ProfitabilityAssessment {
     pub level: ProfitabilityLevel,
     pub score: f64,
@@ -1003,7 +1056,18 @@ pub enum GrowthProspectsLevel {
     Contracting,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl GrowthProspectsLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Moderate => "moderate",
+            Self::Weak => "weak",
+            Self::Contracting => "contracting",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GrowthProspects {
     pub level: GrowthProspectsLevel,
     pub score: f64,
@@ -1019,7 +1083,17 @@ pub enum PricingPowerLevel {
     High,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl PricingPowerLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Moderate => "moderate",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PricingPowerSide {
     pub level: PricingPowerLevel,
     pub score: f64,
@@ -1027,13 +1101,13 @@ pub struct PricingPowerSide {
     pub evidence: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct IndustryPricingPower {
     pub supplier: PricingPowerSide,
     pub customer: PricingPowerSide,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SectorResearchProfile {
     pub sector: String,
     pub company_count: usize,

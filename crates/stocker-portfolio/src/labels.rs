@@ -6,7 +6,7 @@ use chrono::Utc;
 use sqlx::{Row, SqlitePool};
 
 use crate::error::{Error, Result};
-use crate::models::{DeleteLabelResult, Label, LabelEntityType, NewLabel, NewPortfolio};
+use stocker_domain::portfolio::models::{DeleteLabelResult, Label, LabelEntityType, NewLabel, NewPortfolio};
 use crate::portfolios;
 use crate::transactions::{self, TransactionFilter};
 
@@ -430,7 +430,7 @@ fn row_to_label(row: &sqlx::sqlite::SqliteRow) -> Result<Label> {
 mod tests {
     use super::*;
     use crate::auth::ensure_local_user;
-    use crate::models::{NewPortfolio, NewTransaction, TransactionType};
+    use stocker_domain::portfolio::models::{NewPortfolio, NewTransaction, TransactionType};
     use crate::portfolios;
     use crate::transactions;
 

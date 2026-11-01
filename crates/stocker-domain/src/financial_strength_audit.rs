@@ -485,7 +485,7 @@ fn audit_balance_sheet_checks(
             }
         });
         match (ebit, b0) {
-            (Some(e), Some(b)) => crate::yahoo_metrics::local_roce(e, b.total_equity, b.total_debt, b.cash),
+            (Some(e), Some(b)) => crate::ratios::local_roce(e, b.total_equity, b.total_debt, b.cash),
             _ => None,
         }
     };

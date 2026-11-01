@@ -4,7 +4,7 @@ use crate::models::{
     PeerBenchmark, PeerComparisonRow, PeerQuote, ReportInsights, RiskBuckets, RiskCategory, RiskItem,
     ScenarioAnalysis, ScoreBreakdown, SectorAnalysisDetail, StockAnalysis, StructuredResearchSections,
 };
-use crate::yahoo_metrics::{earnings_yield_eps_pct, fcf_yield_pct};
+use crate::ratios::{earnings_yield_eps_pct, fcf_yield_pct};
 
 pub fn evaluate_quality(financials: &Financials) -> f64 {
     evaluate_quality_for(financials, FinancialCompanyType::Industrial)

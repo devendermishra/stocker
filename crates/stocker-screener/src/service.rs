@@ -8,8 +8,9 @@ use sqlx::SqlitePool;
 
 use crate::coverage::CoverageReport;
 use crate::error::{Error, Result};
-use crate::metrics::{MetricSpec, CATALOG};
-use crate::query::{run_query, ScreenQuery, ScreenRow};
+use stocker_domain::screener::metrics::{MetricSpec, CATALOG};
+use crate::query::run_query;
+use stocker_domain::screener::query::{ScreenQuery, ScreenRow};
 use crate::refresh::{BackfillStats, RefreshConfig, RefreshScheduler, SchedulerStatus, SectorBackfillStats};
 use crate::screens::{self, NewSavedScreen, SavedScreen};
 use crate::{db, refresh};
@@ -122,7 +123,7 @@ impl ScreenerService {
     /// Resolve a user symbol to a canonical Yahoo ticker (NSE preferred when dual-listed).
     pub async fn resolve_symbol(&self, raw: &str) -> Result<String> {
         let ctx = crate::universe::india_symbol_context_from_db(&self.pool).await?;
-        stocker_core::resolve_india_symbol(raw, &ctx).map_err(|e| Error::InvalidQuery(e.to_string()))
+        stocker_domain::resolve_india_symbol(raw, &ctx).map_err(|e| Error::InvalidQuery(e.to_string()))
     }
 
     /// Force a refresh of one symbol now (synchronously) — used by the CLI and
@@ -133,7 +134,7 @@ impl ScreenerService {
     }
 
     /// Snapshot metrics for one symbol (resolved Yahoo ticker).
-    pub async fn snapshot_for(&self, symbol: &str) -> Result<Option<crate::query::ScreenRow>> {
+    pub async fn snapshot_for(&self, symbol: &str) -> Result<Option<ScreenRow>> {
         let symbol = self.resolve_symbol(symbol).await?;
         crate::query::fetch_snapshot(&self.pool, &symbol).await
     }

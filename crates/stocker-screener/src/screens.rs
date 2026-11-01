@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::{Error, Result};
-use crate::query::ScreenFilter;
+use stocker_domain::screener::query::ScreenFilter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedScreen {

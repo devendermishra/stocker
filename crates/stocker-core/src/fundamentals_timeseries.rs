@@ -8,7 +8,7 @@ use reqwest::Client;
 use serde_json::Value;
 
 use crate::fetcher::http_client;
-use crate::models::{BalanceSheetRow, CashflowRow, IncomeStatementRow, StatementBundle};
+use stocker_domain::models::{BalanceSheetRow, CashflowRow, IncomeStatementRow, StatementBundle};
 
 const FINANCIALS_KEYS: &[&str] = &[
     "TotalRevenue",

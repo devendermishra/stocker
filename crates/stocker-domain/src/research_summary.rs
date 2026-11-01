@@ -70,6 +70,7 @@ pub fn build_company_overview(
     price: f64,
     bundle: &StatementBundle,
     company_type: FinancialCompanyType,
+    as_of: chrono::NaiveDate,
 ) -> CompanyOverview {
     let summary = profile
         .long_business_summary
@@ -87,7 +88,7 @@ pub fn build_company_overview(
     let yahoo_q = crate::statements::latest_yahoo_quarter_end(bundle);
     let freshness = crate::statements::yahoo_quarter_freshness(
         yahoo_q.as_deref(),
-        chrono::Utc::now().date_naive(),
+        as_of,
     );
 
     CompanyOverview {
@@ -467,6 +468,7 @@ mod tests {
             720.0,
             &bundle,
             FinancialCompanyType::Bank,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
         );
         assert_eq!(o.latest_fiscal_year_end.as_deref(), Some("2026-03-31"));
         assert_eq!(o.latest_yahoo_quarter_end.as_deref(), Some("2026-06-30"));

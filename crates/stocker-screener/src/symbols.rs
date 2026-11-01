@@ -38,7 +38,7 @@ struct SymbolIdentityRow {
 }
 
 fn base_id_from_yahoo(symbol: &str) -> Option<String> {
-    stocker_core::india_base_symbol(symbol).ok()
+    stocker_domain::india_base_symbol(symbol).ok()
 }
 
 /// Normalize company name for dedup: lowercase, trim dots, LTD/Limited equivalence.
@@ -72,7 +72,7 @@ fn prefer_nse(a: &SymbolIdentityRow, b: &SymbolIdentityRow) -> SymbolIdentityRow
 fn identity_to_listing(row: &SymbolIdentityRow) -> SymbolListing {
     let id = base_id_from_yahoo(&row.symbol).unwrap_or_else(|| row.symbol.clone());
     let exchange = Some(
-        stocker_core::india_exchange_label(&row.symbol, row.exchange.as_deref()).to_string(),
+        stocker_domain::india_exchange_label(&row.symbol, row.exchange.as_deref()).to_string(),
     );
     SymbolListing {
         symbol: row.symbol.clone(),
@@ -116,7 +116,7 @@ fn build_pair(primary: &SymbolIdentityRow, counterpart: Option<&SymbolIdentityRo
         bse_id,
         short_name: primary.short_name.clone(),
         exchange: Some(
-            stocker_core::india_exchange_label(&primary.symbol, primary.exchange.as_deref())
+            stocker_domain::india_exchange_label(&primary.symbol, primary.exchange.as_deref())
                 .to_string(),
         ),
         sector: primary.sector.clone(),

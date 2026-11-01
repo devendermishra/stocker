@@ -12,8 +12,12 @@ use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
+use stocker_domain::screener::metrics::{
+    MetricCategory, MetricId, MetricSpec, SourceKind, Unit,
+};
+use stocker_domain::screener::query::ScreenQuery;
 use stocker_screener::{
-    Error as ScreenerError, MetricSpec, NewSavedScreen, RefreshConfig, ScreenQuery, ScreenerService,
+    Error as ScreenerError, NewSavedScreen, RefreshConfig, ScreenerService,
 };
 
 #[derive(Clone)]
@@ -45,15 +49,15 @@ pub fn router(service: Arc<ScreenerService>) -> Router {
 
 #[derive(serde::Serialize)]
 struct CatalogEntry {
-    id: stocker_screener::MetricId,
+    id: MetricId,
     label: &'static str,
     description: &'static str,
-    category: stocker_screener::MetricCategory,
+    category: MetricCategory,
     category_label: &'static str,
-    unit: stocker_screener::Unit,
+    unit: Unit,
     column: &'static str,
     needs_review: bool,
-    source_kind: stocker_screener::SourceKind,
+    source_kind: SourceKind,
 }
 
 impl From<&MetricSpec> for CatalogEntry {

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use sqlx::Row;
 use sqlx::SqlitePool;
+use stocker_domain::mf::parse_mf_symbol;
 use stocker_mf::{MfSearchHit, MfService};
 use stocker_screener::ScreenerService;
 
@@ -13,13 +14,12 @@ use crate::auth::ensure_local_user;
 use crate::engine::{ensure_ledger, RebuildResult};
 use crate::error::{Error, Result};
 use crate::labels;
-use crate::models::{
-    AllocationRow, Dashboard, DeleteLabelResult, Holding, LabelEntityType, NewLabel,
+use stocker_domain::portfolio::models::{
+    AllocationRow, Dashboard, DeleteLabelResult, Holding, Label, LabelEntityType, NewLabel,
     NewPortfolio, NewTransaction, Portfolio, PortfolioSummary, Transaction, UpdatePortfolio,
 };
-use crate::portfolios;
 use crate::transactions::{self, TransactionFilter};
-use crate::{db, models::Label};
+use crate::{db, portfolios};
 
 #[derive(Clone)]
 pub struct PortfolioService {
@@ -79,7 +79,7 @@ impl PortfolioService {
     }
 
     /// Returns the implicit local user (no login required).
-    pub async fn local_user(&self) -> Result<crate::models::User> {
+    pub async fn local_user(&self) -> Result<stocker_domain::portfolio::models::User> {
         ensure_local_user(&self.pool).await
     }
 
@@ -241,10 +241,10 @@ impl PortfolioService {
         &self,
         user_id: i64,
         portfolio_id: i64,
-    ) -> Result<crate::models::ClearTransactionsResult> {
+    ) -> Result<stocker_domain::portfolio::models::ClearTransactionsResult> {
         let deleted =
             transactions::delete_all_for_portfolio(&self.pool, user_id, portfolio_id).await?;
-        Ok(crate::models::ClearTransactionsResult {
+        Ok(stocker_domain::portfolio::models::ClearTransactionsResult {
             transactions_deleted: deleted,
         })
     }
@@ -306,7 +306,7 @@ impl PortfolioService {
             for row in &resolver_rows {
                 if let Some(txn) = &row.transaction {
                     if let Some(sym) = txn.symbol.as_deref() {
-                        if let Some(code) = stocker_mf::parse_mf_symbol(sym) {
+                        if let Some(code) = parse_mf_symbol(sym) {
                             let _ = mf.ensure_scheme(code).await;
                         }
                     }
@@ -339,7 +339,7 @@ impl PortfolioService {
             self.mf.clone(),
             user_id,
             portfolio_id,
-            Some(crate::models::ScheduleType::Sip),
+            Some(stocker_domain::portfolio::models::ScheduleType::Sip),
         )
         .await?;
         let mut result = crate::sip_refresh::refresh_sip_transactions(
@@ -364,7 +364,7 @@ impl PortfolioService {
             self.mf.clone(),
             user_id,
             portfolio_id,
-            Some(crate::models::ScheduleType::Swp),
+            Some(stocker_domain::portfolio::models::ScheduleType::Swp),
         )
         .await?;
         let mut result = crate::swp_refresh::refresh_swp_transactions(
@@ -382,8 +382,8 @@ impl PortfolioService {
         &self,
         user_id: i64,
         portfolio_id: i64,
-        input: &crate::models::RegisterMfSchedule,
-    ) -> Result<crate::models::RegisterMfScheduleResult> {
+        input: &stocker_domain::portfolio::models::RegisterMfSchedule,
+    ) -> Result<stocker_domain::portfolio::models::RegisterMfScheduleResult> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
         let symbol = self.resolve_symbol(&input.symbol).await?;
         crate::mf_schedule::register_mf_schedule(
@@ -401,7 +401,7 @@ impl PortfolioService {
         &self,
         user_id: i64,
         portfolio_id: i64,
-    ) -> Result<Vec<crate::models::MfSchedule>> {
+    ) -> Result<Vec<stocker_domain::portfolio::models::MfSchedule>> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
         crate::mf_schedule::list_mf_schedules(
             &self.pool,
@@ -416,7 +416,7 @@ impl PortfolioService {
         &self,
         user_id: i64,
         schedule_id: i64,
-    ) -> Result<crate::models::MfSchedule> {
+    ) -> Result<stocker_domain::portfolio::models::MfSchedule> {
         crate::mf_schedule::inactivate_schedule(&self.pool, user_id, schedule_id).await
     }
 
@@ -612,7 +612,7 @@ impl PortfolioService {
         user_id: i64,
         portfolio_id: i64,
         symbol: &str,
-    ) -> Result<Vec<crate::models::FifoLot>> {
+    ) -> Result<Vec<stocker_domain::portfolio::models::FifoLot>> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
         let symbol = self.resolve_symbol(symbol).await?;
         if !self.read_only {
@@ -631,7 +631,7 @@ impl PortfolioService {
 
         rows.iter()
             .map(|row| {
-                Ok(crate::models::FifoLot {
+                Ok(stocker_domain::portfolio::models::FifoLot {
                     id: row.try_get("id")?,
                     portfolio_id: row.try_get("portfolio_id")?,
                     symbol: row.try_get("symbol")?,
@@ -650,7 +650,7 @@ impl PortfolioService {
         &self,
         user_id: i64,
         portfolio_id: i64,
-    ) -> Result<Vec<crate::models::RealizedMatch>> {
+    ) -> Result<Vec<stocker_domain::portfolio::models::RealizedMatch>> {
         let _ = portfolios::get(&self.pool, user_id, portfolio_id).await?;
         if !self.read_only {
             ensure_ledger(&self.pool, portfolio_id, false).await?;
@@ -667,7 +667,7 @@ impl PortfolioService {
 
         rows.iter()
             .map(|row| {
-                Ok(crate::models::RealizedMatch {
+                Ok(stocker_domain::portfolio::models::RealizedMatch {
                     id: row.try_get("id")?,
                     portfolio_id: row.try_get("portfolio_id")?,
                     sell_transaction_id: row.try_get("sell_transaction_id")?,
@@ -689,7 +689,7 @@ impl PortfolioService {
 
 fn merge_schedule_refresh_into_sip_result(
     result: &mut crate::sip_refresh::SipRefreshResult,
-    schedule: crate::models::RegisterMfScheduleResult,
+    schedule: stocker_domain::portfolio::models::RegisterMfScheduleResult,
 ) {
     result.registered = schedule.registered;
     for buy_id in schedule.materialized {
@@ -709,7 +709,7 @@ fn merge_schedule_refresh_into_sip_result(
 
 fn merge_schedule_refresh_into_swp_result(
     result: &mut crate::swp_refresh::SwpRefreshResult,
-    schedule: crate::models::RegisterMfScheduleResult,
+    schedule: stocker_domain::portfolio::models::RegisterMfScheduleResult,
 ) {
     result.registered = schedule.registered;
     for sell_id in schedule.materialized {
