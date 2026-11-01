@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/stocker-domain",
     "crates/stocker-core",
     "crates/stocker-screener",
     "crates/stocker-mf",

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::models::mf_symbol;
+use stocker_domain::mf::mf_symbol;
 
 const CACHE_FILE_NAME: &str = "mf_schemes_list.json";
 
@@ -62,7 +62,7 @@ impl SchemeIndex {
 
     pub fn lookup_symbol(&self, raw: &str) -> Option<i64> {
         let trimmed = raw.trim();
-        if let Some(code) = crate::models::parse_mf_symbol(trimmed) {
+        if let Some(code) = stocker_domain::mf::parse_mf_symbol(trimmed) {
             return Some(code);
         }
         if trimmed.chars().all(|c| c.is_ascii_digit()) {

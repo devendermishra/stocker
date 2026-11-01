@@ -8,10 +8,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
+use stocker_domain::portfolio::models::{
+    LabelEntityType, NewLabel, NewPortfolio, NewTransaction, RegisterMfSchedule, UpdatePortfolio,
+    User,
+};
 use stocker_portfolio::{
-    Error as PortfolioError, ImportApplyRequest, ImportParseBody, LabelEntityType, NewLabel,
-    NewPortfolio, NewTransaction, PortfolioService, PortfolioViewOptions, RegisterMfSchedule,
-    TransactionFilter, UpdatePortfolio,
+    Error as PortfolioError, ImportApplyRequest, ImportParseBody, PortfolioService,
+    PortfolioViewOptions, TransactionFilter,
 };
 
 #[derive(Clone)]
@@ -155,7 +158,7 @@ pub fn router(service: Arc<PortfolioService>) -> Router {
         .with_state(PortfolioState { service })
 }
 
-async fn local_user(s: &PortfolioState) -> Result<stocker_portfolio::User, Response> {
+async fn local_user(s: &PortfolioState) -> Result<User, Response> {
     s.service.local_user().await.map_err(portfolio_error_response)
 }
 

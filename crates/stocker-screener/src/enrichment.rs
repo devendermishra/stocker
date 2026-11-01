@@ -1,8 +1,7 @@
 //! Map screener snapshot rows into lightweight report enrichment structs.
 
-use stocker_core::ScreenerMetricSnapshot;
-
-use crate::query::ScreenRow;
+use stocker_domain::ScreenerMetricSnapshot;
+use stocker_domain::screener::query::ScreenRow;
 
 fn metric_f64(row: &ScreenRow, key: &str) -> Option<f64> {
     row.metrics.get(key).and_then(|v| v.as_f64())

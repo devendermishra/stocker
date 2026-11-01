@@ -5,7 +5,7 @@
 
 use crate::fetcher::http_client;
 use crate::http_policy::screener_get;
-use crate::models::{FinancialTable, FinancialTableRow, BankingMetrics, ScreenerFinancials};
+use stocker_domain::models::{FinancialTable, FinancialTableRow, BankingMetrics, ScreenerFinancials};
 
 fn strip_html(raw: &str) -> String {
     let mut out = String::new();

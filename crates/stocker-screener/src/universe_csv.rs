@@ -36,7 +36,7 @@ pub fn to_yahoo_symbol(nse_symbol: &str) -> String {
 
 /// Map a BSE security id to a Yahoo Finance ticker (`*.BO`).
 pub fn to_yahoo_bse_symbol(bse_security_id: &str) -> String {
-    stocker_core::to_yahoo_bse_symbol(bse_security_id)
+    stocker_domain::to_yahoo_bse_symbol(bse_security_id)
 }
 
 /// Resolved path from `STOCKER_UNIVERSE_CSV`, if set.
@@ -197,7 +197,7 @@ fn parse_exchange_universe_csv(bytes: &[u8], mode: ExchangeParseMode) -> Vec<Dis
         .map(|h| h.iter().map(|c| c.trim().to_uppercase()).collect())
         .unwrap_or_default();
 
-    let nse_cols = stocker_core::nse_csv_indices(&headers);
+    let nse_cols = stocker_domain::nse_csv_indices(&headers);
     let sym_idx = nse_cols.symbol_col;
     let bse_id_idx = headers.iter().position(|h| {
         h == "SECURITY ID"

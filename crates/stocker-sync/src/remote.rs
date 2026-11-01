@@ -8,7 +8,7 @@ use stocker_portfolio::{
     auth::LOCAL_USER_EMAIL, analytics::PortfolioViewOptions, db, portfolios, PortfolioService,
     TransactionFilter,
 };
-use stocker_portfolio::models::{Dashboard, Portfolio, PortfolioStatus, Transaction};
+use stocker_domain::portfolio::models::{Dashboard, Portfolio, PortfolioStatus, Transaction};
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::backup::{extract_file_from_zip, read_manifest_from_zip};
@@ -221,7 +221,7 @@ pub async fn remote_portfolio_dashboard(portfolio_id: i64) -> Result<Dashboard> 
         .map_err(map_portfolio_err)
 }
 
-pub async fn remote_portfolio_holdings(portfolio_id: i64) -> Result<Vec<stocker_portfolio::models::Holding>> {
+pub async fn remote_portfolio_holdings(portfolio_id: i64) -> Result<Vec<stocker_domain::portfolio::models::Holding>> {
     let (snapshot, svc) = remote_service(false).await?;
     ensure_remote_portfolio_db(&snapshot)?;
     let uid = remote_user_id(&svc).await?;
@@ -246,7 +246,7 @@ pub async fn remote_portfolio_transactions(
 
 pub async fn remote_portfolio_allocation_stock(
     portfolio_id: i64,
-) -> Result<Vec<stocker_portfolio::models::AllocationRow>> {
+) -> Result<Vec<stocker_domain::portfolio::models::AllocationRow>> {
     let (snapshot, svc) = remote_service(false).await?;
     ensure_remote_portfolio_db(&snapshot)?;
     let uid = remote_user_id(&svc).await?;
@@ -257,7 +257,7 @@ pub async fn remote_portfolio_allocation_stock(
 
 pub async fn remote_portfolio_allocation_label(
     portfolio_id: i64,
-) -> Result<Vec<stocker_portfolio::models::AllocationRow>> {
+) -> Result<Vec<stocker_domain::portfolio::models::AllocationRow>> {
     let (snapshot, svc) = remote_service(false).await?;
     ensure_remote_portfolio_db(&snapshot)?;
     let uid = remote_user_id(&svc).await?;
@@ -269,7 +269,7 @@ pub async fn remote_portfolio_allocation_label(
 pub async fn remote_portfolio_stock_lots(
     portfolio_id: i64,
     symbol: &str,
-) -> Result<Vec<stocker_portfolio::models::FifoLot>> {
+) -> Result<Vec<stocker_domain::portfolio::models::FifoLot>> {
     let (snapshot, svc) = remote_service(false).await?;
     ensure_remote_portfolio_db(&snapshot)?;
     let uid = remote_user_id(&svc).await?;
@@ -485,7 +485,7 @@ fn is_too_large_error(err: &Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stocker_portfolio::models::PortfolioStatus;
+    use stocker_domain::portfolio::models::PortfolioStatus;
 
     fn remote_row(id: i64, name: &str) -> RemotePortfolioRow {
         RemotePortfolioRow {

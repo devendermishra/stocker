@@ -4,7 +4,7 @@ use chrono::Utc;
 use sqlx::{Row, SqlitePool};
 
 use crate::error::{Error, Result};
-use crate::models::{NewPortfolio, Portfolio, PortfolioStatus, UpdatePortfolio};
+use stocker_domain::portfolio::models::{NewPortfolio, Portfolio, PortfolioStatus, UpdatePortfolio};
 
 pub async fn list(
     pool: &SqlitePool,

@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use env_logger::Env;
-use stocker_screener::{db::default_db_path, RefreshConfig, ScreenQuery, ScreenerService};
+use stocker_domain::screener::query::ScreenQuery;
+use stocker_screener::{db::default_db_path, RefreshConfig, ScreenerService};
 
 /// NSE stock research CLI (Yahoo Finance data + screener)
 #[derive(Parser, Debug)]

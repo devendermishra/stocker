@@ -2,85 +2,13 @@
 //! conditions joined by AND. No string interpolation of user input — every
 //! field becomes a column via the typed [`MetricId`] enum.
 
-use serde::{Deserialize, Serialize};
 use sqlx::{Arguments, Row, SqlitePool};
 
 use crate::error::{Error, Result};
-use crate::metrics::MetricId;
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum FilterOp {
-    Gt,
-    Gte,
-    Lt,
-    Lte,
-    Eq,
-    Between,
-    IsNotNull,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ScreenValue {
-    Number(f64),
-    Range(f64, f64),
-    None,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScreenFilter {
-    pub field: MetricId,
-    pub op: FilterOp,
-    #[serde(default = "default_value")]
-    pub value: ScreenValue,
-}
-
-fn default_value() -> ScreenValue {
-    ScreenValue::None
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum SortDir {
-    Asc,
-    Desc,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScreenQuery {
-    #[serde(default)]
-    pub filters: Vec<ScreenFilter>,
-    #[serde(default)]
-    pub sort: Option<(MetricId, SortDir)>,
-    #[serde(default = "default_limit")]
-    pub limit: u32,
-}
-
-fn default_limit() -> u32 {
-    100
-}
-
-/// One result row. Identity columns + metric values that the user filters on
-/// (we always return the full snapshot — let the UI pick what to show).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScreenRow {
-    pub symbol: String,
-    pub short_name: Option<String>,
-    pub sector: Option<String>,
-    pub industry: Option<String>,
-    pub exchange: Option<String>,
-    pub currency: Option<String>,
-    pub country: Option<String>,
-    pub tier: Option<i64>,
-    pub face_value: Option<f64>,
-    pub last_refreshed_at: Option<i64>,
-    pub last_refresh_status: Option<String>,
-    pub last_refresh_error: Option<String>,
-    pub updated_at: Option<i64>,
-    /// Metric values keyed by column name (snake_case from the catalog).
-    pub metrics: serde_json::Map<String, serde_json::Value>,
-}
+use stocker_domain::screener::metrics::MetricId;
+use stocker_domain::screener::query::{
+    FilterOp, ScreenQuery, ScreenRow, ScreenValue, SortDir,
+};
 
 const SYMBOL_SNAPSHOT_SELECT: &str = "s.symbol, sym.short_name, sym.sector, sym.industry, sym.exchange, \
     sym.currency, sym.country, sym.tier, sym.face_value AS symbol_face_value, sym.last_refreshed_at, \
@@ -106,7 +34,7 @@ fn row_from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<ScreenRow> {
     let symbol: String = row.try_get("symbol")?;
     let exchange = row
         .try_get::<Option<String>, _>("exchange")?
-        .map(|raw| stocker_core::india_exchange_label(&symbol, Some(raw.as_str())).to_string());
+        .map(|raw| stocker_domain::india_exchange_label(&symbol, Some(raw.as_str())).to_string());
     Ok(ScreenRow {
         symbol,
         short_name: row.try_get("short_name")?,

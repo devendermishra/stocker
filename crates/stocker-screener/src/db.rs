@@ -10,7 +10,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 
 use crate::error::{Error, Result};
-use crate::metrics::{validate_catalog, MetricId};
+use stocker_domain::screener::metrics::{validate_catalog, MetricId};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 

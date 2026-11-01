@@ -1,55 +1,20 @@
-//! NSE-focused stock research core: Yahoo Finance fetch + heuristics.
+//! Yahoo Finance fetch and research-report orchestration.
 //!
-//! **Data sources:** Symbol universes are loaded from local CSV files only
-//! (`stocker-screener`). Live quotes, fundamentals, and news use Yahoo Finance
-//! endpoints — never NSE/BSE exchange APIs or scraping.
+//! Domain rules live in `stocker-domain`. This crate fetches market data and
+//! assembles a [`stocker_domain::ResearchReport`].
 
-pub mod analysis;
 pub mod bank_metrics;
-pub mod financial_company;
-pub mod canonical;
 pub mod fetcher;
 mod fundamentals_timeseries;
-pub mod financial_strength_audit;
-pub mod fundamental_analysis;
 mod http_policy;
-pub mod math;
-pub mod models;
 pub mod paths;
 pub mod report;
-pub mod research_summary;
 pub mod sector;
-pub mod sector_research;
-pub mod series_integrity;
-pub mod statements;
-pub mod stock_scoring;
 pub mod symbol;
-pub mod technical_analysis;
-pub mod technical_entry_signal;
-pub mod valuation_analysis;
 pub mod yahoo_metrics;
 
-pub use models::*;
-pub use canonical::{build_canonical, build_canonical_for, peer_comparability};
-pub use yahoo_metrics::{
-    canonical_statement_fcf, earnings_yield_eps_pct, fcf_yield_pct, local_roce,
-    normalize_debt_to_equity, report_fcf, resolve_enterprise_value,
-};
-pub use financial_strength_audit::{
-    build_action_guidance, build_financial_strength_audit, build_financial_strength_audit_for,
-    cumulative_cfo_pat_for_bundle,
-};
-pub use math::{cagr, median, pct_change};
-pub use report::{ResearchReport, build_research_report};
-pub use sector_research::{
-    compute_sector_research_profile, sector_inputs_from_aggregates, sector_inputs_from_quotes,
-    SectorCohortRow,
-};
-pub use symbol::{
-    default_india_symbol_context, india_base_symbol, india_display_ticker, india_exchange_label,
-    normalize_nse_symbol, nse_csv_indices, resolve_india_symbol, to_yahoo_bse_symbol,
-    IndiaSymbolContext, NseCsvIndices,
-};
+pub use report::build_research_report;
+pub use symbol::{default_india_symbol_context, load_nse_bases_from_equity_l};
 pub use error::{Result, StockerError};
 
 mod error;

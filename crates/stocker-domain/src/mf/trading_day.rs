@@ -4,14 +4,21 @@ use std::sync::OnceLock;
 
 static HOLIDAYS: OnceLock<HashSet<NaiveDate>> = OnceLock::new();
 
+fn parse_holiday_dates(raw: &str) -> Result<HashSet<NaiveDate>, String> {
+    let dates: Vec<String> = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let mut out = HashSet::with_capacity(dates.len());
+    for date in dates {
+        let parsed = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+            .map_err(|_| format!("nse_holidays.json has unparseable date {date}"))?;
+        out.insert(parsed);
+    }
+    Ok(out)
+}
+
 fn holiday_set() -> &'static HashSet<NaiveDate> {
     HOLIDAYS.get_or_init(|| {
-        let raw = include_str!("../data/nse_holidays.json");
-        let dates: Vec<String> = serde_json::from_str(raw).expect("valid nse_holidays.json");
-        dates
-            .into_iter()
-            .filter_map(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
-            .collect()
+        parse_holiday_dates(include_str!("../../data/nse_holidays.json"))
+            .expect("crates/stocker-domain/data/nse_holidays.json")
     })
 }
 
@@ -38,6 +45,12 @@ pub fn should_refresh_nav(fetched_at: Option<i64>, now: i64, today: NaiveDate) -
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    #[test]
+    fn holiday_file_parses_every_date() {
+        let dates = parse_holiday_dates(include_str!("../../data/nse_holidays.json")).unwrap();
+        assert!(dates.contains(&NaiveDate::from_ymd_opt(2026, 1, 26).unwrap()));
+    }
 
     #[test]
     fn weekend_is_not_trading_day() {

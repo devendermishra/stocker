@@ -165,7 +165,7 @@ fn fundamental_profitability_section(
         }
     });
     let local_roce = match (ebit, b0) {
-        (Some(e), Some(b)) => crate::yahoo_metrics::local_roce(e, b.total_equity, b.total_debt, b.cash),
+        (Some(e), Some(b)) => crate::ratios::local_roce(e, b.total_equity, b.total_debt, b.cash),
         _ => None,
     };
     let roce = financials
@@ -307,7 +307,7 @@ fn fundamental_cashflow_section(
         .unwrap_or(0.0);
     let capex = c0.map(|c| c.capital_expenditure).unwrap_or(0.0);
     let fcf = c0
-        .and_then(crate::yahoo_metrics::row_statement_fcf)
+        .and_then(crate::ratios::row_statement_fcf)
         .or(financials.free_cashflow)
         .unwrap_or(0.0);
     let pat = financials
@@ -323,8 +323,8 @@ fn fundamental_cashflow_section(
     } else {
         None
     };
-    let fcf_yield = crate::yahoo_metrics::fcf_yield_pct(
-        c0.and_then(crate::yahoo_metrics::row_statement_fcf)
+    let fcf_yield = crate::ratios::fcf_yield_pct(
+        c0.and_then(crate::ratios::row_statement_fcf)
             .or(financials.free_cashflow),
         financials.market_cap,
     );

@@ -25,7 +25,7 @@ fn api_error(status: StatusCode, msg: impl Display) -> Response {
 async fn resolve_screener_enrichment(
     screener: Option<&Arc<ScreenerService>>,
     symbol: &str,
-) -> Option<stocker_core::ScreenerMetricSnapshot> {
+) -> Option<stocker_domain::ScreenerMetricSnapshot> {
     let svc = screener?;
     let mut row = svc.snapshot_for(symbol).await.ok().flatten();
     let has_price = row

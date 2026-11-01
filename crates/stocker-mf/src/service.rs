@@ -9,12 +9,12 @@ use sqlx::{Row, SqlitePool};
 use crate::db;
 use crate::error::{Error, Result};
 use crate::fetcher::{first_nav_on_or_after, MfFetcher};
-use crate::models::{mf_symbol, MfSearchHit, NavPoint, NavSnapshot};
+use crate::models::{MfSearchHit, NavPoint, NavSnapshot};
+use stocker_domain::mf::{mf_symbol, parse_mf_symbol, should_refresh_nav};
 use crate::scheme_index::{
     default_scheme_list_cache_path, load_scheme_index_from_file, save_scheme_list_cache,
     strip_yahoo_exchange_suffix, SchemeIndex, SchemeListEntry,
 };
-use crate::trading_day::should_refresh_nav;
 
 #[derive(Clone)]
 pub struct MfService {
@@ -100,7 +100,7 @@ impl MfService {
         }
 
         // Already resolved symbol?
-        if let Some(code) = crate::models::parse_mf_symbol(trimmed) {
+        if let Some(code) = parse_mf_symbol(trimmed) {
             self.ensure_scheme(code).await?;
             return Ok(code);
         }
@@ -349,7 +349,7 @@ pub async fn resolve_mf_symbol(svc: &MfService, name: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::models::{is_mutual_fund_symbol, mf_symbol, parse_mf_symbol};
+    use stocker_domain::mf::{is_mutual_fund_symbol, mf_symbol, parse_mf_symbol};
 
     #[test]
     fn mf_symbol_roundtrip() {

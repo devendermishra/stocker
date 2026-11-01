@@ -4,9 +4,6 @@ compile_error!("Features `web` and `desktop` are mutually exclusive. For the sta
 #[cfg(all(not(feature = "web"), not(feature = "desktop")))]
 compile_error!("Enable `web` (default) or `desktop`.");
 
-#[cfg(feature = "web")]
-mod web_types;
-
 mod api;
 mod app;
 mod components;

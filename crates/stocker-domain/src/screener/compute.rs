@@ -13,18 +13,21 @@
 
 use std::collections::HashMap;
 
-use stocker_core::math::{cagr, median};
-use stocker_core::models::{
+use crate::math::{cagr, median};
+use crate::models::{
     AssetProfile, BalanceSheetRow, CashflowRow, ChartHistory, Financials, IncomeStatementRow,
     PeerQuote, StatementBundle,
 };
-use stocker_core::statements::{
+use crate::ratios::row_statement_fcf;
+use crate::series_integrity::{aligns_with_quote, latest_step_usable, trailing_cagr_pct};
+use crate::statements::{
     balance_annual_asc, cashflow_annual_asc, cashflow_quarterly_asc, income_annual_asc,
     income_quarterly_asc,
 };
-use stocker_core::technical_analysis::{macd_components, roc_pct, sma_last};
+use crate::technical_analysis::{macd_components, roc_pct, rsi14, sma_last};
+use crate::{cumulative_cfo_pat_for_bundle, resolve_enterprise_value};
 
-use crate::metrics::MetricId;
+use super::metrics::MetricId;
 
 /// All inputs for one symbol. Borrows the upstream models so compute is cheap.
 pub struct ComputeInputs<'a> {
@@ -210,7 +213,7 @@ fn resolve_cfo_ttm(f: &Financials, cashflow_q: &[&CashflowRow]) -> f64 {
 
 /// Statement FCF (CFO − capex). Never Yahoo levered `freeCashflow`.
 fn statement_fcf(row: &CashflowRow) -> Option<f64> {
-    stocker_core::yahoo_metrics::row_statement_fcf(row)
+    row_statement_fcf(row)
 }
 
 fn resolve_fcf_ttm(_f: &Financials, cashflow_q: &[&CashflowRow], cash_a: &[&CashflowRow]) -> f64 {
@@ -269,7 +272,7 @@ fn compute_price_to_fcf(
 
 /// Enterprise value from Yahoo, or market cap + debt − cash when missing.
 fn enterprise_value(f: &Financials) -> f64 {
-    stocker_core::resolve_enterprise_value(
+    resolve_enterprise_value(
         f.enterprise_value,
         f.market_cap,
         f.total_debt,
@@ -444,7 +447,7 @@ fn growth_ttm_or_annual<F: Fn(&IncomeStatementRow) -> f64>(
 ) -> Option<f64> {
     ttm_growth_pct(income_q, &f).or_else(|| {
         let values: Vec<f64> = income_a.iter().map(|r| f(r)).collect();
-        if !stocker_core::series_integrity::latest_step_usable(&values, yahoo_latest_yoy) {
+        if !latest_step_usable(&values, yahoo_latest_yoy) {
             return None;
         }
         annual_two_year_growth_pct(income_a, f)
@@ -1220,11 +1223,11 @@ fn compute_balance_sheet_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: 
 fn compute_cashflow_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
     out.insert(
         MetricId::CumulativeCfoPat3y,
-        stocker_core::cumulative_cfo_pat_for_bundle(ctx.stmts, 3),
+        cumulative_cfo_pat_for_bundle(ctx.stmts, 3),
     );
     out.insert(
         MetricId::CumulativeCfoPat5y,
-        stocker_core::cumulative_cfo_pat_for_bundle(ctx.stmts, 5),
+        cumulative_cfo_pat_for_bundle(ctx.stmts, 5),
     );
     out.insert(MetricId::CfoPatLatestYear, cfo_pat_latest_year(&ctx.income_a, &ctx.cash_a));
     out.insert(MetricId::OperatingCashflowTtm, finite(ctx.cfo_ttm));
@@ -1256,7 +1259,7 @@ fn compute_technical_metrics(out: &mut HashMap<MetricId, Option<f64>>, ctx: &Com
         out.insert(MetricId::MacdPreviousDay, m);
         out.insert(MetricId::MacdSignalPreviousDay, s);
     }
-    out.insert(MetricId::Rsi14, stocker_core::technical_analysis::rsi14(&ctx.closes_v));
+    out.insert(MetricId::Rsi14, rsi14(&ctx.closes_v));
 }
 
 fn compute_composite_scores(out: &mut HashMap<MetricId, Option<f64>>, ctx: &ComputeContext<'_>) {
@@ -1387,11 +1390,11 @@ fn annual_cagr_pct<F: Fn(&IncomeStatementRow) -> f64>(
 ) -> Option<f64> {
     let values: Vec<f64> = rows.iter().map(|r| f(r)).collect();
     if let Some(&latest) = values.last() {
-        if !stocker_core::series_integrity::aligns_with_quote(latest, quote_ttm) {
+        if !aligns_with_quote(latest, quote_ttm) {
             return None;
         }
     }
-    stocker_core::series_integrity::trailing_cagr_pct(&values, years, yahoo_latest_yoy).value
+    trailing_cagr_pct(&values, years, yahoo_latest_yoy).value
 }
 
 /// CAGR for a target horizon (5Y / 7Y), falling back to shorter spans when Yahoo only returns ~4 annual periods.
@@ -1539,7 +1542,7 @@ fn statement_roa(
 
 fn historical_pe_median_fallback(
     income: &[&IncomeStatementRow],
-    bars: &[stocker_core::models::ChartBar],
+    bars: &[crate::models::ChartBar],
     target_years: usize,
     shares: f64,
 ) -> Option<f64> {
@@ -1561,7 +1564,7 @@ fn historical_pe_median_fallback(
 
 fn historical_pe_median(
     income: &[&IncomeStatementRow],
-    bars: &[stocker_core::models::ChartBar],
+    bars: &[crate::models::ChartBar],
     years: usize,
     shares: f64,
 ) -> Option<f64> {
@@ -1577,7 +1580,7 @@ fn historical_pe_median(
             continue;
         }
         // Find the chart bar closest to this fiscal year end timestamp.
-        let mut best: Option<&stocker_core::models::ChartBar> = None;
+        let mut best: Option<&crate::models::ChartBar> = None;
         let mut best_dist = i64::MAX;
         for bar in bars {
             let dist = (bar.ts - end_ts).abs();
@@ -1777,7 +1780,7 @@ fn g_factor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stocker_core::models::{BalanceSheetRow, CashflowRow, ChartBar, ChartHistory, Financials, IncomeStatementRow};
+    use crate::models::{BalanceSheetRow, CashflowRow, ChartBar, ChartHistory, Financials, IncomeStatementRow};
 
     #[test]
     fn cagr_pct_basics() {

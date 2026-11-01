@@ -15,9 +15,9 @@ use stocker_core::fetcher::{
     fetch_statement_bundle,
 };
 
-use crate::compute::{compute_all, ComputeInputs};
+use stocker_domain::screener::compute::{compute_all, ComputeInputs};
 use crate::error::Result;
-use crate::metrics::MetricId;
+use stocker_domain::screener::metrics::MetricId;
 use crate::snapshot::{count_pending, count_symbols, next_due_symbol, StockSnapshot, SymbolRow};
 use crate::universe;
 

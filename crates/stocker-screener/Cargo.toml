@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 stocker-core = { path = "../stocker-core" }
+stocker-domain = { path = "../stocker-domain" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

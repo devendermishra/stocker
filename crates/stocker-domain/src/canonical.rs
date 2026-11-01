@@ -5,7 +5,7 @@ use crate::statements::{
     balance_annual_desc, cashflow_annual_desc, cashflow_quarterly_asc, income_annual_asc,
     income_annual_desc,
 };
-use crate::yahoo_metrics::{canonical_statement_fcf, local_roce};
+use crate::ratios::{canonical_statement_fcf, local_roce};
 
 fn nonzero(v: f64) -> Option<f64> {
     if v.is_finite() && v.abs() > 1e-9 {
@@ -45,14 +45,19 @@ fn ttm_sum_income(q: &[&IncomeStatementRow], f: impl Fn(&IncomeStatementRow) -> 
     nonzero(s)
 }
 
-pub fn build_canonical(bundle: &StatementBundle, yahoo: &Financials) -> CanonicalMetrics {
-    build_canonical_for(bundle, yahoo, FinancialCompanyType::Industrial)
+pub fn build_canonical(
+    bundle: &StatementBundle,
+    yahoo: &Financials,
+    as_of: chrono::NaiveDate,
+) -> CanonicalMetrics {
+    build_canonical_for(bundle, yahoo, FinancialCompanyType::Industrial, as_of)
 }
 
 pub fn build_canonical_for(
     bundle: &StatementBundle,
     yahoo: &Financials,
     company_type: FinancialCompanyType,
+    as_of: chrono::NaiveDate,
 ) -> CanonicalMetrics {
     let inc_a = income_annual_desc(bundle);
     let inc_q = crate::statements::true_quarterly_income_rows(bundle);
@@ -74,7 +79,6 @@ pub fn build_canonical_for(
     let latest_yahoo_quarter_pat_source_column = q_pat_row
         .and_then(|r| r.net_income_yahoo_row.clone())
         .unwrap_or_default();
-    let as_of = chrono::Utc::now().date_naive();
     let freshness = crate::statements::yahoo_quarter_freshness(
         if latest_yahoo_quarter_pat_period.is_empty() {
             None
@@ -403,6 +407,10 @@ mod tests {
     use super::*;
     use crate::models::{BalanceSheetRow, CashflowRow, FinancialCompanyType, IncomeStatementRow, StatementBundle};
 
+    fn fixed_as_of() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 6, 30).unwrap()
+    }
+
     #[test]
     fn cash_flow_quality_inputs_come_from_statements_not_yahoo_zero() {
         let bundle = StatementBundle {
@@ -428,7 +436,7 @@ mod tests {
             free_cashflow: None,
             ..Default::default()
         };
-        let c = build_canonical(&bundle, &yahoo);
+        let c = build_canonical(&bundle, &yahoo, fixed_as_of());
         assert_eq!(c.pat, Some(100.0));
         assert_eq!(c.cfo, Some(120.0));
         assert_eq!(c.fcf, Some(80.0));
@@ -476,7 +484,7 @@ mod tests {
             net_income: Some(750e9),
             ..Default::default()
         };
-        let c = build_canonical(&bundle, &yahoo);
+        let c = build_canonical(&bundle, &yahoo, fixed_as_of());
         assert!(c.revenue_cagr_3y_pct.is_none());
         assert!(c.notes.iter().any(|n| n.contains("SCOPE") || n.contains("inconsistent")));
     }
@@ -493,7 +501,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let c = build_canonical_for(&bundle, &Financials::default(), FinancialCompanyType::NbfcProjectFinance);
+        let c = build_canonical_for(&bundle, &Financials::default(), FinancialCompanyType::NbfcProjectFinance, fixed_as_of());
         assert!((c.calculated_nii.unwrap() - 216.24e9).abs() < 1e7);
         assert!((c.yahoo_reported_nii.unwrap() - 207.50e9).abs() < 1e7);
         assert_eq!(c.nii_definition, "Yahoo Net Interest Income statement row");
@@ -522,6 +530,7 @@ mod tests {
             &bundle,
             &Financials::default(),
             FinancialCompanyType::NbfcProjectFinance,
+            fixed_as_of(),
         );
         assert!((c.calculated_nii.unwrap() - 216.2375e9).abs() < 1e5);
         assert!((c.yahoo_reported_nii.unwrap() - 216.2375e9).abs() < 1e5);
@@ -541,7 +550,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let c = build_canonical_for(&bundle, &Financials::default(), FinancialCompanyType::NbfcProjectFinance);
+        let c = build_canonical_for(&bundle, &Financials::default(), FinancialCompanyType::NbfcProjectFinance, fixed_as_of());
         assert_eq!(c.nii_definition, "calculated");
         assert_eq!(c.canonical_nii_source, "calculated_nii");
         assert!((c.net_interest_income.unwrap() - 216.24e9).abs() < 1e7);
@@ -563,7 +572,7 @@ mod tests {
             income_quarterly: vec![q(40e9), q(40e9), q(40e9), q(40.86e9)],
             ..Default::default()
         };
-        let c = build_canonical(&bundle, &Financials::default());
+        let c = build_canonical(&bundle, &Financials::default(), fixed_as_of());
         assert!((c.fy_pat.unwrap() - 163.08e9).abs() < 1.0);
         assert!((c.ttm_pat.unwrap() - 160.86e9).abs() < 1e7);
         assert_eq!(c.pat_period, "ttm");
@@ -603,7 +612,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let c = build_canonical(&bundle, &Financials::default());
+        let c = build_canonical(&bundle, &Financials::default(), fixed_as_of());
         assert!((c.latest_yahoo_quarter_pat.unwrap() - 181e9).abs() < 1.0);
         assert_eq!(c.latest_yahoo_quarter_pat_period, "2026-06-30");
         assert_eq!(
@@ -632,7 +641,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let c = build_canonical_for(&bundle, &Financials::default(), FinancialCompanyType::Bank);
+        let c = build_canonical_for(&bundle, &Financials::default(), FinancialCompanyType::Bank, fixed_as_of());
         assert!((c.yahoo_loan_book_field.unwrap() - 30.9938865e12).abs() < 1e6);
         assert_eq!(c.yahoo_loan_book_row, "Net Loan");
         assert!(c.yahoo_loan_book_growth_yoy_pct.unwrap() > 9.0);

@@ -6,13 +6,14 @@ use std::sync::Arc;
 use chrono::{Datelike, NaiveDate, Utc};
 use sqlx::{Row, SqlitePool};
 use stocker_core::fetcher::fetch_chart_events;
-use stocker_mf::{parse_mf_symbol, MfService};
+use stocker_domain::mf::parse_mf_symbol;
+use stocker_mf::MfService;
 
 use crate::engine::{ensure_ledger, rebuild};
 use crate::error::{Error, Result};
-use crate::models::{NewTransaction, Transaction, TransactionType};
+use stocker_domain::portfolio::models::{NewTransaction, Transaction, TransactionType};
 use crate::mf_schedule;
-use crate::models::ScheduleType;
+use stocker_domain::portfolio::models::ScheduleType;
 use crate::sip_refresh::{load_materialized_sip_ids, materialize_sip};
 use crate::swp_refresh::{load_materialized_swp_ids, materialize_swp};
 use crate::transactions::{self, corporate_action_key, TransactionFilter};
@@ -551,6 +552,16 @@ fn holdings_qty_at_date(txns: Option<&[Transaction]>, as_of_date: &str) -> f64 {
     holdings_qty_as_of(txns, as_of_date, true)
 }
 
+fn skip_applied_action(applied: &mut HashSet<String>, key: &Option<String>) -> bool {
+    match key {
+        Some(key) => !applied.insert(key.clone()),
+        None => false,
+    }
+}
+
+/// Share count using the same split, bonus, and corporate-action rules as
+/// [`stocker_domain::portfolio::replay_transactions`]. A quantity-only split is
+/// that multiple (5 means 5-for-1). A repeated `corporate_action_key` applies once.
 fn holdings_qty_as_of(
     txns: Option<&[Transaction]>,
     as_of_date: &str,
@@ -560,6 +571,7 @@ fn holdings_qty_as_of(
         return 0.0;
     };
     let mut lots: Vec<Lot> = Vec::new();
+    let mut applied: HashSet<String> = HashSet::new();
     for txn in txns {
         if include_as_of {
             if txn.trade_date.as_str() > as_of_date {
@@ -595,17 +607,34 @@ fn holdings_qty_as_of(
                 lots.retain(|l| l.remaining_qty > 1e-9);
             }
             TransactionType::Split => {
-                let num = txn.split_ratio_num.filter(|n| *n > 0.0).unwrap_or(1.0);
-                let den = txn.split_ratio_den.filter(|d| *d > 0.0).unwrap_or(1.0);
-                let factor = num / den;
+                if skip_applied_action(&mut applied, &txn.corporate_action_key) {
+                    continue;
+                }
+                let factor = if let Some(num) = txn.split_ratio_num.filter(|n| *n > 0.0) {
+                    let den = txn.split_ratio_den.filter(|d| *d > 0.0).unwrap_or(1.0);
+                    num / den
+                } else if let Some(qty) = txn.quantity.filter(|q| *q > 0.0) {
+                    qty
+                } else {
+                    continue;
+                };
+                if factor <= 0.0 {
+                    continue;
+                }
                 for lot in lots.iter_mut() {
                     lot.remaining_qty *= factor;
                 }
             }
             TransactionType::Bonus => {
+                if skip_applied_action(&mut applied, &txn.corporate_action_key) {
+                    continue;
+                }
                 if let (Some(bonus_num), Some(bonus_den)) =
                     (txn.bonus_ratio_num, txn.bonus_ratio_den)
                 {
+                    if bonus_num <= 0.0 || bonus_den <= 0.0 {
+                        continue;
+                    }
                     let factor = 1.0 + bonus_num / bonus_den;
                     for lot in lots.iter_mut() {
                         lot.remaining_qty *= factor;
@@ -1097,6 +1126,20 @@ mod tests {
     }
 
     #[test]
+    fn quantity_only_split_matches_ledger_replay() {
+        let mut split = tx(1, TransactionType::Split, "2024-06-01", Some(5.0), None, None);
+        split.corporate_action_key = Some("split-1".into());
+        let mut again = split.clone();
+        again.trade_date = "2024-06-02".into();
+        let txns = vec![
+            tx(1, TransactionType::Buy, "2024-01-01", Some(10.0), None, None),
+            split,
+            again,
+        ];
+        assert!((holdings_qty_at_date(Some(txns.as_slice()), "2024-07-01") - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn should_suggest_split_between_buys_when_held_on_ex_date() {
         let txns = vec![
             tx(1, TransactionType::Buy, "2020-01-01", Some(10.0), None, None),
@@ -1155,7 +1198,7 @@ mod tests {
         let portfolio = portfolios::create(
             &pool,
             user.id,
-            &crate::models::NewPortfolio {
+            &stocker_domain::portfolio::models::NewPortfolio {
                 name: "Refresh".into(),
                 description: None,
                 base_currency: None,
@@ -1219,7 +1262,7 @@ mod tests {
         let portfolio = portfolios::create(
             &pool,
             user.id,
-            &crate::models::NewPortfolio {
+            &stocker_domain::portfolio::models::NewPortfolio {
                 name: "CA".into(),
                 description: None,
                 base_currency: None,

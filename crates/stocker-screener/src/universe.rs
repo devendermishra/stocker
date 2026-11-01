@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use sqlx::{Row, SqlitePool};
-use stocker_core::IndiaSymbolContext;
+use stocker_domain::IndiaSymbolContext;
 
 use crate::error::Result;
 use crate::snapshot::{remove_dual_listed_bse_symbols, SymbolRow};
@@ -48,7 +48,7 @@ pub fn nse_bases_from_discovered(discovered: &[DiscoveredSymbol]) -> HashSet<Str
     discovered
         .iter()
         .filter(|d| d.symbol.ends_with(".NS"))
-        .filter_map(|d| stocker_core::india_base_symbol(&d.symbol).ok())
+        .filter_map(|d| stocker_domain::india_base_symbol(&d.symbol).ok())
         .collect()
 }
 
@@ -65,7 +65,7 @@ pub async fn nse_bases_from_db(pool: &SqlitePool) -> Result<HashSet<String>> {
     let mut out = HashSet::new();
     for row in rows {
         let sym: String = row.try_get("symbol")?;
-        if let Ok(base) = stocker_core::india_base_symbol(&sym) {
+        if let Ok(base) = stocker_domain::india_base_symbol(&sym) {
             out.insert(base);
         }
     }

@@ -15,3 +15,11 @@ pub enum StockerError {
 }
 
 pub type Result<T> = std::result::Result<T, StockerError>;
+
+impl From<stocker_domain::DomainError> for StockerError {
+    fn from(err: stocker_domain::DomainError) -> Self {
+        match err {
+            stocker_domain::DomainError::InvalidSymbol(message) => Self::InvalidSymbol(message),
+        }
+    }
+}

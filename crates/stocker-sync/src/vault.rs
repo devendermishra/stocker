@@ -389,8 +389,15 @@ pub fn startup_allowed() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
     use tempfile::TempDir;
+
+    fn lock_tests() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn test_config_dir() -> TempDir {
         let dir = TempDir::new().unwrap();
@@ -401,6 +408,7 @@ mod tests {
 
     #[test]
     fn setup_unlock_round_trip() {
+        let _guard = lock_tests();
         let _dir = test_config_dir();
         setup_vault(
             "secret12",
@@ -425,6 +433,7 @@ mod tests {
 
     #[test]
     fn wrong_password_fails() {
+        let _guard = lock_tests();
         let _dir = test_config_dir();
         setup_vault(
             "secret12",
@@ -443,6 +452,7 @@ mod tests {
 
     #[test]
     fn tokens_persist_across_lock_unlock() {
+        let _guard = lock_tests();
         let _dir = test_config_dir();
         setup_vault(
             "secret12",
@@ -468,6 +478,7 @@ mod tests {
 
     #[test]
     fn migrate_legacy_oauth_file() {
+        let _guard = lock_tests();
         let dir = test_config_dir();
         ensure_config_dir().unwrap();
         std::fs::write(

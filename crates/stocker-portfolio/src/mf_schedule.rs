@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, Utc};
 use sqlx::{Row, SqlitePool};
+use stocker_domain::mf::parse_mf_symbol;
 use stocker_mf::MfService;
 
 use crate::engine::rebuild;
 use crate::error::{Error, Result};
-use crate::models::{
+use stocker_domain::portfolio::models::{
     MfSchedule, RegisterMfSchedule, RegisterMfScheduleResult, ScheduleFailure, ScheduleStatus,
     ScheduleType, TransactionType,
 };
@@ -444,7 +445,7 @@ pub async fn list_mf_schedules(
 }
 
 async fn scheme_name_for_symbol(mf: Option<&MfService>, symbol: &str) -> Option<String> {
-    let code = stocker_mf::parse_mf_symbol(symbol)?;
+    let code = parse_mf_symbol(symbol)?;
     if let Some(svc) = mf {
         if let Ok(nav) = svc.load_scheme_meta(code).await {
             return Some(nav.scheme_name);
@@ -734,7 +735,7 @@ pub async fn refresh_active_schedules(
 mod tests {
     use super::*;
     use crate::auth::ensure_local_user;
-    use crate::models::NewPortfolio;
+    use stocker_domain::portfolio::models::NewPortfolio;
     use crate::portfolios;
 
     #[test]

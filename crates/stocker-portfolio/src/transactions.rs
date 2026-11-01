@@ -5,7 +5,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::engine::rebuild;
 use crate::error::{Error, Result};
-use crate::models::{NewTransaction, Transaction, TransactionType};
+use stocker_domain::portfolio::models::{NewTransaction, Transaction, TransactionType};
 use crate::portfolios;
 
 const TXN_SELECT: &str = "id, user_id, portfolio_id, txn_type, trade_date, symbol, quantity, price,
@@ -429,7 +429,7 @@ mod tests {
     use super::*;
     use crate::auth::ensure_local_user;
     use crate::engine::rebuild;
-    use crate::models::{NewPortfolio, TransactionType};
+    use stocker_domain::portfolio::models::{NewPortfolio, TransactionType};
 
     #[tokio::test]
     async fn update_transaction_rebuilds_holdings() {
