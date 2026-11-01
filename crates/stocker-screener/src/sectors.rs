@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-use stocker_core::{
+use stocker_domain::{
     compute_sector_research_profile, sector_inputs_from_aggregates, SectorCohortRow,
     SectorResearchProfile,
 };
@@ -41,31 +41,16 @@ pub struct SectorDetail {
     pub members: Vec<SectorMember>,
 }
 
-fn phase_str(p: stocker_core::SectorLifecyclePhase) -> String {
-    match p {
-        stocker_core::SectorLifecyclePhase::Startup => "startup".into(),
-        stocker_core::SectorLifecyclePhase::Growth => "growth".into(),
-        stocker_core::SectorLifecyclePhase::Consolidation => "consolidation".into(),
-        stocker_core::SectorLifecyclePhase::MaturityOrDecline => "maturity_or_decline".into(),
-    }
+fn phase_str(p: stocker_domain::SectorLifecyclePhase) -> String {
+    p.as_str().into()
 }
 
-fn type_str(t: stocker_core::SectorTypeKind) -> String {
-    match t {
-        stocker_core::SectorTypeKind::Growth => "growth".into(),
-        stocker_core::SectorTypeKind::Cyclical => "cyclical".into(),
-        stocker_core::SectorTypeKind::Defensive => "defensive".into(),
-        stocker_core::SectorTypeKind::CyclicalGrowth => "cyclical_growth".into(),
-    }
+fn type_str(t: stocker_domain::SectorTypeKind) -> String {
+    t.as_str().into()
 }
 
-fn growth_str(g: stocker_core::GrowthProspectsLevel) -> String {
-    match g {
-        stocker_core::GrowthProspectsLevel::Strong => "strong".into(),
-        stocker_core::GrowthProspectsLevel::Moderate => "moderate".into(),
-        stocker_core::GrowthProspectsLevel::Weak => "weak".into(),
-        stocker_core::GrowthProspectsLevel::Contracting => "contracting".into(),
-    }
+fn growth_str(g: stocker_domain::GrowthProspectsLevel) -> String {
+    g.as_str().into()
 }
 
 /// Resolve a path/query sector name to the DB label (exact case-insensitive match).

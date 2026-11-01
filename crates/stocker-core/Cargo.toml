@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+stocker-domain = { path = "../stocker-domain" }
 reqwest = { version = "0.12", features = ["json", "gzip", "cookies"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

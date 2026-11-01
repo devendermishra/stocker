@@ -268,7 +268,7 @@ pub fn build_valuation_analysis_for(
         }
     };
 
-    let calculated_ev = crate::yahoo_metrics::resolve_enterprise_value(
+    let calculated_ev = crate::ratios::resolve_enterprise_value(
         None,
         financials.market_cap,
         financials.total_debt,
@@ -277,7 +277,7 @@ pub fn build_valuation_analysis_for(
     let calculated_ev_ebitda = if company_type.is_lender() {
         None
     } else {
-        crate::yahoo_metrics::ev_to_ebitda(calculated_ev, financials.ebitda)
+        crate::ratios::ev_to_ebitda(calculated_ev, financials.ebitda)
     };
     let yahoo_ev_ebitda = if company_type.is_lender() {
         None
@@ -298,7 +298,7 @@ pub fn build_valuation_analysis_for(
     } else {
         String::new()
     };
-    let ev = crate::yahoo_metrics::resolve_enterprise_value(
+    let ev = crate::ratios::resolve_enterprise_value(
         financials.enterprise_value,
         financials.market_cap,
         financials.total_debt,
@@ -307,7 +307,7 @@ pub fn build_valuation_analysis_for(
     let ev_sales = if company_type.is_lender() {
         None
     } else {
-        crate::yahoo_metrics::ev_to_sales(ev, financials.revenue).or(subject.ev_to_sales)
+        crate::ratios::ev_to_sales(ev, financials.revenue).or(subject.ev_to_sales)
     };
 
     let mcap_sales = if financials.market_cap > 0.0 && financials.revenue > 0.0 {
@@ -316,7 +316,7 @@ pub fn build_valuation_analysis_for(
         None
     };
 
-    let earn_y = crate::yahoo_metrics::earnings_yield_eps_pct(
+    let earn_y = crate::ratios::earnings_yield_eps_pct(
         price,
         financials.trailing_eps,
         financials.pe_ratio,
@@ -325,12 +325,12 @@ pub fn build_valuation_analysis_for(
     let statement_fcf = if company_type.is_lender() {
         None
     } else {
-        crate::yahoo_metrics::report_fcf(financials.free_cashflow, bundle)
+        crate::ratios::report_fcf(financials.free_cashflow, bundle)
     };
     let fcf_y = if company_type.is_lender() {
         None
     } else {
-        crate::yahoo_metrics::fcf_yield_pct(statement_fcf, financials.market_cap)
+        crate::ratios::fcf_yield_pct(statement_fcf, financials.market_cap)
     };
 
     let fair_pe = med_pe_5.or(med_pe_3).unwrap_or(18.0).clamp(8.0, 45.0);

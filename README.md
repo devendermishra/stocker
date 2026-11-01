@@ -4,7 +4,7 @@ Rust workspace that pulls NSE-oriented data from Yahoo Finance (same unofficial 
 
 - **HTTP API** (`stocker-api`, Axum)
 - **CLI** (`stocker-cli`)
-- **Web UI** (`stocker-web`, Dioxus): **API mode** (WASM + HTTP to the API) or **direct mode** (native desktop, calls `stocker-core` and `stocker-screener` in-process; no API server)
+- **Web UI** (`stocker-web`, Dioxus): **API mode** (WASM + HTTP to the API, sharing `stocker-domain` types) or **direct mode** (native desktop, calls `stocker-core` and `stocker-screener` in-process; no API server)
 
 This is not investment advice. Yahoo data can be incomplete or rate-limited.
 
@@ -61,11 +61,15 @@ Headless alternative (no UI): `cargo run -p stocker-cli -- screener --query quer
 
 | Path | Role |
 |------|------|
-| `crates/stocker-core` | Fetch, models, analysis, shared `math` / `statements` helpers, `build_research_report` |
-| `crates/stocker-screener` | NSE screener: SQLite snapshots, sectioned `compute_all` metric engine, refresh job, AND filters |
+| `crates/stocker-domain` | Pure rules: research models and scoring, screener catalog and `compute_all`, portfolio FIFO, mutual-fund stamp duty. No HTTP, SQLite, or filesystem |
+| `crates/stocker-core` | Yahoo fetch and `build_research_report` |
+| `crates/stocker-screener` | NSE screener: SQLite snapshots, refresh job, SQL for AND filters |
+| `crates/stocker-mf` | Mutual-fund NAV cache (`mf.db`) and mfapi.in |
+| `crates/stocker-portfolio` | Portfolio ledger (`portfolio.db`) and import |
+| `crates/stocker-sync` | Google Drive vault backup |
 | `crates/api` | Axum server (research + screener routes) |
 | `crates/cli` | Research report JSON + screener queries |
-| `frontend` | Dioxus SPA (research + screener UI) |
+| `frontend` | Dioxus SPA (research + screener UI). Web and desktop both use `stocker-domain` types |
 
 ## Prerequisites
 
@@ -227,12 +231,12 @@ Shareholding fields (FII/DII/promoter), industry PE/PBV, and all-time prices sin
 
 | Feature | Target | How data is loaded |
 |---------|--------|---------------------|
-| **`web`** (default) | `wasm32-unknown-unknown` | Browser UI loads research + screener over **HTTP** from `stocker-api`. |
-| **`desktop`** | Native (Windows/macOS/Linux) | Same UI runs **in-process**: `stocker_core` + `stocker_screener`. No API process required. |
+| **`web`** (default) | `wasm32-unknown-unknown` | Browser UI loads research + screener over **HTTP** from `stocker-api`. Report types come from `stocker-domain`. |
+| **`desktop`** | Native (Windows/macOS/Linux) | Same UI runs **in-process**: `stocker_core` + `stocker_screener` + `stocker_portfolio`. No API process required. |
 
 See [Quick start: desktop app](#quick-start-desktop-app-research--screener) and [Quick start: screener in the browser](#quick-start-screener-in-the-browser-wasm--api) for step-by-step commands.
 
-Browser WASM cannot link `stocker-core` or `stocker-screener` (networking/SQLite stack is not built for WASM), so the standalone “direct” path is the **native desktop** build, not the same WASM binary.
+Browser WASM links `stocker-domain` and does not link `stocker-core` or `stocker-screener` (networking/SQLite stack is not built for WASM), so the standalone “direct” path is the **native desktop** build, not the same WASM binary.
 
 ### API mode (WASM + HTTP)
 

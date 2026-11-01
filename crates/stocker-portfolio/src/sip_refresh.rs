@@ -6,11 +6,12 @@ use std::sync::Arc;
 use chrono::{TimeZone, Utc};
 use sqlx::SqlitePool;
 use stocker_core::fetcher::fetch_chart_history;
-use stocker_mf::{allot_mf_purchase, mf_symbol, parse_mf_symbol, MfService};
+use stocker_domain::mf::{allot_mf_purchase, mf_symbol, parse_mf_symbol};
+use stocker_mf::MfService;
 
 use crate::engine::rebuild;
 use crate::error::{Error, Result};
-use crate::models::{NewTransaction, Transaction, TransactionType};
+use stocker_domain::portfolio::models::{NewTransaction, Transaction, TransactionType};
 use crate::transactions::{self, TransactionFilter};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -332,10 +333,10 @@ async fn stock_price_on_or_after(symbol: &str, sip_date: &str) -> Result<(String
 mod tests {
     use super::*;
     use crate::db;
-    use crate::models::NewTransaction;
+    use stocker_domain::portfolio::models::NewTransaction;
     use crate::portfolios;
     use crate::transactions;
-    use stocker_mf::allot_mf_purchase;
+    use stocker_domain::mf::allot_mf_purchase;
 
     #[test]
     fn sip_buy_key_format() {
@@ -370,7 +371,7 @@ mod tests {
         let portfolio = portfolios::create(
             &pool,
             user.id,
-            &crate::models::NewPortfolio {
+            &stocker_domain::portfolio::models::NewPortfolio {
                 name: "SIP".into(),
                 description: None,
                 base_currency: None,

@@ -1,6 +1,4 @@
-use serde::Serialize;
-
-use crate::analysis::{
+use stocker_domain::analysis::{
     build_structured_sections, compute_peer_analysis_for, compute_report_insights,
     compute_sector_analysis_for,
 };
@@ -12,62 +10,14 @@ use crate::fetcher::{
     sanitize_india_insider_transactions,
 };
 use crate::bank_metrics::bank_metrics_for;
-use crate::models::{
-    AssetProfile, BankingMetrics, CanonicalMetrics, CompanyOverview, Financials, FinancialsApplicable, FinancialsRawYahoo, FinancialStrengthAudit, FundamentalAnalysis,
-    ManagementAnalysis, MarketSignals, NewsItem, PeerAnalysis, PeerQuote, ReportInsights,
-    ResearchRating, ResearchSummary, ScoreBreakdown, ScreenerMetricSnapshot, SectorAnalysisDetail,
-    Shareholders, StockAnalysis, StructuredResearchSections, TechnicalAnalysis,
-    TechnicalEntrySignal, ValuationAnalysis,
-};
-use crate::research_summary::build_company_overview;
-use crate::technical_analysis::build_technical_analysis;
-use crate::technical_entry_signal::build_technical_entry_signal;
-use crate::symbol::{default_india_symbol_context, resolve_india_symbol, IndiaSymbolContext};
-use crate::yahoo_metrics::{
-    ev_to_ebitda, ev_to_sales, report_fcf, resolve_enterprise_value,
-};
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ResearchReport {
-    pub symbol: String,
-    pub long_name: Option<String>,
-    pub price: f64,
-    /// ISO-8601 UTC time of this live Yahoo fan-out.
-    pub retrieved_at: String,
-    pub financials: Financials,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub financials_applicable: Option<FinancialsApplicable>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub financials_raw_yahoo: Option<FinancialsRawYahoo>,
-    pub canonical: CanonicalMetrics,
-    pub shareholders: Shareholders,
-    pub annual_reports: Vec<crate::models::AnnualReport>,
-    pub company_summary: Option<String>,
-    pub asset_profile: AssetProfile,
-    pub financial_company_type: crate::models::FinancialCompanyType,
-    pub stock_analysis: StockAnalysis,
-    pub management_analysis: ManagementAnalysis,
-    pub sector_analysis: SectorAnalysisDetail,
-    pub peer_analysis: PeerAnalysis,
-    pub news: Vec<NewsItem>,
-    pub sector_news: Vec<NewsItem>,
-    pub report_insights: ReportInsights,
-    pub structured_sections: StructuredResearchSections,
-    pub score_breakdown: ScoreBreakdown,
-    pub company_overview: CompanyOverview,
-    pub fundamental_analysis: FundamentalAnalysis,
-    pub valuation_analysis: ValuationAnalysis,
-    pub technical_analysis: TechnicalAnalysis,
-    pub technical_entry: TechnicalEntrySignal,
-    pub research_rating: ResearchRating,
-    pub research_summary: ResearchSummary,
-    pub financial_strength_audit: FinancialStrengthAudit,
-    pub market_signals: MarketSignals,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bank_metrics: Option<BankingMetrics>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub screener_enrichment: Option<ScreenerMetricSnapshot>,
-}
+use crate::symbol::default_india_symbol_context;
+use stocker_domain::models::{PeerQuote, ScreenerMetricSnapshot};
+use stocker_domain::ratios::{ev_to_ebitda, ev_to_sales, report_fcf, resolve_enterprise_value};
+use stocker_domain::research_summary::build_company_overview;
+use stocker_domain::symbol::{resolve_india_symbol, IndiaSymbolContext};
+use stocker_domain::technical_analysis::build_technical_analysis;
+use stocker_domain::technical_entry_signal::build_technical_entry_signal;
+use stocker_domain::ResearchReport;
 
 /// Fetch and analyze one India-listed symbol (Yahoo `*.NS` or `*.BO`).
 ///
@@ -80,7 +30,9 @@ pub async fn build_research_report(
     let default_ctx = default_india_symbol_context();
     let ctx = resolve_ctx.unwrap_or(&default_ctx);
     let symbol = resolve_india_symbol(raw_symbol, ctx)?;
-    let retrieved_at = chrono::Utc::now().to_rfc3339();
+    let now = chrono::Utc::now();
+    let retrieved_at = now.to_rfc3339();
+    let as_of = now.date_naive();
 
     let (
         price,
@@ -133,7 +85,7 @@ pub async fn build_research_report(
         .unwrap_or("NSE listed equities");
     let sector_news = fetch_sector_news(sector_key).await;
 
-    let company_type = crate::financial_company::classify_financial_company(&symbol, &profile);
+    let company_type = stocker_domain::financial_company::classify_financial_company(&symbol, &profile);
     if company_type.is_lender() {
         financials.industrial_yahoo_fields_analysis_applicable = false;
     }
@@ -214,37 +166,37 @@ pub async fn build_research_report(
         }
     }
 
-    let canonical = crate::canonical::build_canonical_for(&statements, &financials, company_type);
+    let canonical = stocker_domain::canonical::build_canonical_for(&statements, &financials, company_type, as_of);
 
-    let inc_desc = crate::statements::income_annual_desc(&statements);
-    let rev_levels: Vec<f64> = crate::statements::income_annual_asc(&statements)
+    let inc_desc = stocker_domain::statements::income_annual_desc(&statements);
+    let rev_levels: Vec<f64> = stocker_domain::statements::income_annual_asc(&statements)
         .iter()
         .map(|r| r.revenue)
         .collect();
     let yahoo_rev_g = financials.revenue_growth.filter(|x| x.abs() > 1e-9);
-    let rev_check = crate::series_integrity::check_level_series(&rev_levels, yahoo_rev_g);
+    let rev_check = stocker_domain::series_integrity::check_level_series(&rev_levels, yahoo_rev_g);
     let annual_reports =
-        crate::series_integrity::annual_reports_from_income(
+        stocker_domain::series_integrity::annual_reports_from_income(
             &inc_desc,
             &rev_check,
             !company_type.is_lender(),
         );
 
     let bank_metrics = bank_metrics_for(&symbol);
-    let coverage = crate::financial_company::build_data_coverage(
+    let coverage = stocker_domain::financial_company::build_data_coverage(
         company_type,
         &financials,
         &canonical,
         bank_metrics.as_ref(),
     );
-    let fundamental_analysis = crate::fundamental_analysis::build_fundamental_analysis_for(
+    let fundamental_analysis = stocker_domain::fundamental_analysis::build_fundamental_analysis_for(
         &statements,
         &financials,
         company_type,
         bank_metrics.as_ref(),
         Some(&canonical),
     );
-    let financial_strength_audit = crate::financial_strength_audit::build_financial_strength_audit_for(
+    let financial_strength_audit = stocker_domain::financial_strength_audit::build_financial_strength_audit_for(
         &statements,
         &financials,
         &profile,
@@ -259,7 +211,7 @@ pub async fn build_research_report(
     } else {
         report_fcf(financials.free_cashflow, &statements)
     };
-    let mut stock_analysis = crate::analysis::compute_stock_analysis_for(
+    let mut stock_analysis = stocker_domain::analysis::compute_stock_analysis_for(
         price,
         &financials,
         &annual_reports,
@@ -267,7 +219,7 @@ pub async fn build_research_report(
         &canonical,
         company_type,
     );
-    let management_analysis = crate::analysis::compute_management_analysis_for(
+    let management_analysis = stocker_domain::analysis::compute_management_analysis_for(
         officer_pay,
         financials.revenue,
         profile.long_business_summary.as_deref(),
@@ -287,7 +239,7 @@ pub async fn build_research_report(
         company_type,
     );
     if company_type.is_lender() {
-        let (comp, direct, bank_c) = crate::financial_company::peer_comparability_for(company_type);
+        let (comp, direct, bank_c) = stocker_domain::financial_company::peer_comparability_for(company_type);
         peer_analysis.peer_comparability = comp;
         peer_analysis.direct_peer_comparability = direct;
         peer_analysis.bank_comparability = bank_c;
@@ -303,13 +255,13 @@ pub async fn build_research_report(
             .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or("Unclassified");
-        let inputs = crate::sector_research::sector_inputs_from_quotes(
+        let inputs = stocker_domain::sector_research::sector_inputs_from_quotes(
             sector_name,
             &subject_quote,
             &peer_only,
         );
         sector_analysis.research =
-            Some(crate::sector_research::compute_sector_research_profile(&inputs));
+            Some(stocker_domain::sector_research::compute_sector_research_profile(&inputs));
     }
     let mut report_insights = compute_report_insights(
         &stock_analysis,
@@ -347,8 +299,9 @@ pub async fn build_research_report(
         price,
         &statements,
         company_type,
+        as_of,
     );
-    let valuation_analysis = crate::valuation_analysis::build_valuation_analysis_for(
+    let valuation_analysis = stocker_domain::valuation_analysis::build_valuation_analysis_for(
         price,
         &financials,
         &chart,
@@ -370,7 +323,7 @@ pub async fn build_research_report(
         &fundamental_analysis,
         &valuation_analysis,
     );
-    let research_rating = crate::stock_scoring::build_research_rating_for(
+    let research_rating = stocker_domain::stock_scoring::build_research_rating_for(
         &financials,
         &fundamental_analysis,
         &valuation_analysis,
@@ -425,7 +378,7 @@ pub async fn build_research_report(
             overall, research_rating.rating_label
         );
     }
-    let research_summary = crate::research_summary::build_research_summary_for(
+    let research_summary = stocker_domain::research_summary::build_research_summary_for(
         &fundamental_analysis,
         &valuation_analysis,
         &technical_analysis,

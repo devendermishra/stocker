@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::{Error, Result};
-use crate::models::User;
+use stocker_domain::portfolio::models::User;
 
 const SESSION_TTL_SECS: i64 = 30 * 24 * 60 * 60; // 30 days
 

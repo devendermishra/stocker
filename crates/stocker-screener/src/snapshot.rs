@@ -6,7 +6,7 @@ use chrono::Utc;
 use sqlx::{Arguments, Row, SqlitePool};
 
 use crate::error::{Error, Result};
-use crate::metrics::MetricId;
+use stocker_domain::screener::metrics::MetricId;
 
 /// One symbol's worth of metric values + metadata.
 #[derive(Debug, Clone)]
@@ -89,7 +89,7 @@ impl SymbolRow {
             self.exchange.as_deref()
         };
         let exchange =
-            stocker_core::india_exchange_label(&self.symbol, yahoo_hint).to_string();
+            stocker_domain::india_exchange_label(&self.symbol, yahoo_hint).to_string();
         let sql = r#"
             INSERT INTO symbols (symbol, short_name, sector, industry, exchange, currency, country, tier, face_value, isin)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -201,7 +201,7 @@ pub async fn remove_dual_listed_bse_symbols(pool: &SqlitePool) -> Result<u64> {
         if let Some(isin) = isin.as_ref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty()) {
             nse_isins.insert(isin);
         }
-        if let Some(base) = stocker_core::india_base_symbol(sym).ok() {
+        if let Some(base) = stocker_domain::india_base_symbol(sym).ok() {
             nse_bases.insert(base.to_uppercase());
         }
         if let Some(name) = name {
@@ -225,7 +225,7 @@ pub async fn remove_dual_listed_bse_symbols(pool: &SqlitePool) -> Result<u64> {
             .map(|s| s.trim().to_uppercase())
             .filter(|s| !s.is_empty())
             .is_some_and(|i| nse_isins.contains(&i))
-            || stocker_core::india_base_symbol(&sym)
+            || stocker_domain::india_base_symbol(&sym)
                 .ok()
                 .is_some_and(|b| nse_bases.contains(&b.to_uppercase()))
             || name.as_ref().is_some_and(|n| {

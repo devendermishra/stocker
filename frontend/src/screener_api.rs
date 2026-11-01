@@ -479,7 +479,7 @@ mod desktop_backend {
     }
 
     pub async fn run_search(query: serde_json::Value) -> Result<Vec<ScreenRow>, String> {
-        let q: stocker_screener::ScreenQuery =
+        let q: stocker_domain::screener::query::ScreenQuery =
             serde_json::from_value(query).map_err(|e| e.to_string())?;
         let svc = service().await?;
         let rows = svc.run_query(&q).await.map_err(|e| e.to_string())?;
@@ -568,7 +568,7 @@ mod desktop_backend {
 
     pub async fn create_screen(name: String, filters: serde_json::Value) -> Result<SavedScreen, String> {
         let svc = service().await?;
-        let filters: Vec<stocker_screener::ScreenFilter> =
+        let filters: Vec<stocker_domain::screener::query::ScreenFilter> =
             serde_json::from_value(filters).map_err(|e| e.to_string())?;
         let new = NewSavedScreen { name, filters };
         let s = svc.create_screen(&new).await.map_err(|e| e.to_string())?;

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::error::Result;
-use crate::metrics::{MetricId, CATALOG};
+use stocker_domain::screener::metrics::{MetricId, CATALOG};
 
 /// Availability tier for one metric across all snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +29,7 @@ pub struct MetricCoverage {
     pub description: &'static str,
     pub category_label: &'static str,
     pub column: &'static str,
-    pub source_kind: crate::metrics::SourceKind,
+    pub source_kind: stocker_domain::screener::metrics::SourceKind,
     pub needs_review: bool,
     pub filled: i64,
     pub fill_pct: f64,

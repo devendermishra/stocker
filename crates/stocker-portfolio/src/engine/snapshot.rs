@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::{Error, Result};
-use crate::models::{Holding, PortfolioSummary};
+use stocker_domain::portfolio::models::{Holding, PortfolioSummary};
 
-use super::rebuild::{self, RebuildResult, SymbolStats};
+use super::rebuild::{self, RebuildResult, FIFO_LOTS_VERSION};
+use stocker_domain::portfolio::SymbolStats;
 
 pub const STOCK_PRICE_TTL_SECS: i64 = 3600;
 pub const MF_PRICE_TTL_SECS: i64 = 24 * 3600;
@@ -43,10 +44,22 @@ struct LedgerSnapshotJson {
     symbols: HashMap<String, SymbolStats>,
 }
 
-/// Whether transactions changed since the last ledger rebuild.
+fn fifo_version_of(summary_json: &str) -> i64 {
+    #[derive(Deserialize)]
+    struct Version {
+        #[serde(default)]
+        fifo_version: i64,
+    }
+    serde_json::from_str::<Version>(summary_json)
+        .map(|v| v.fifo_version)
+        .unwrap_or(0)
+}
+
+/// Whether transactions changed since the last ledger rebuild, or the stored
+/// lot rows were written by an older replay.
 pub async fn ledger_dirty(pool: &SqlitePool, portfolio_id: i64) -> Result<bool> {
     let row = sqlx::query(
-        "SELECT rebuilt_at FROM portfolio_snapshots WHERE portfolio_id = ?",
+        "SELECT summary_json, rebuilt_at FROM portfolio_snapshots WHERE portfolio_id = ?",
     )
     .bind(portfolio_id)
     .fetch_optional(pool)
@@ -55,6 +68,10 @@ pub async fn ledger_dirty(pool: &SqlitePool, portfolio_id: i64) -> Result<bool> 
     let Some(row) = row else {
         return Ok(true);
     };
+    let summary_json: String = row.try_get("summary_json")?;
+    if fifo_version_of(&summary_json) < FIFO_LOTS_VERSION {
+        return Ok(true);
+    }
     let rebuilt_at: i64 = row.try_get("rebuilt_at")?;
 
     let max_updated: Option<i64> = sqlx::query_scalar(
@@ -298,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_ledger_skips_rebuild_when_clean() {
         use crate::db;
-        use crate::models::{NewPortfolio, NewTransaction, TransactionType};
+        use stocker_domain::portfolio::models::{NewPortfolio, NewTransaction, TransactionType};
         use crate::portfolios;
 
         let pool = db::open_memory().await.unwrap();
@@ -344,6 +361,18 @@ mod tests {
         let first = ensure_ledger(&pool, portfolio.id, false).await.unwrap();
         let second = ensure_ledger(&pool, portfolio.id, false).await.unwrap();
         assert_eq!(first.rebuilt_at, second.rebuilt_at);
+        assert!(!super::ledger_dirty(&pool, portfolio.id).await.unwrap());
+
+        sqlx::query(
+            "UPDATE portfolio_snapshots SET summary_json = ? WHERE portfolio_id = ?",
+        )
+        .bind(r#"{"invested_amount":0,"realized_gain":0,"dividend_received":0,"symbols":{}}"#)
+        .bind(portfolio.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(super::ledger_dirty(&pool, portfolio.id).await.unwrap());
+        ensure_ledger(&pool, portfolio.id, false).await.unwrap();
         assert!(!super::ledger_dirty(&pool, portfolio.id).await.unwrap());
     }
 }

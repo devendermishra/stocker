@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use sqlx::SqlitePool;
-use stocker_mf::{parse_mf_symbol, MfService};
+use stocker_domain::mf::{mf_symbol, parse_mf_symbol};
+use stocker_mf::MfService;
 
 use crate::engine::{ensure_ledger, rebuild};
 use crate::error::{Error, Result};
-use crate::models::{NewTransaction, Transaction, TransactionType};
+use stocker_domain::portfolio::models::{NewTransaction, Transaction, TransactionType};
 use crate::transactions::{self, TransactionFilter};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -134,7 +135,7 @@ pub async fn materialize_swp(
         }
     };
     let mf = mf.ok_or_else(|| Error::Other("mutual fund service unavailable".into()))?;
-    let resolved = stocker_mf::mf_symbol(scheme_code);
+    let resolved = mf_symbol(scheme_code);
     let nav = mf
         .nav_on_or_after(scheme_code, &swp.trade_date)
         .await

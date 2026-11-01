@@ -6069,6 +6069,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stocker-core",
+ "stocker-domain",
  "stocker-mf",
  "stocker-portfolio",
  "stocker-screener",
@@ -6086,6 +6087,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "stocker-core",
+ "stocker-domain",
  "stocker-screener",
  "stocker-sync",
  "tokio",
@@ -6101,10 +6103,21 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "stocker-domain",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "urlencoding",
+]
+
+[[package]]
+name = "stocker-domain"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -6119,6 +6132,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "stocker-core",
+ "stocker-domain",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6141,6 +6155,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "stocker-core",
+ "stocker-domain",
  "stocker-mf",
  "stocker-screener",
  "tempfile",
@@ -6163,6 +6178,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "stocker-core",
+ "stocker-domain",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6187,6 +6203,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "stocker-core",
+ "stocker-domain",
  "stocker-portfolio",
  "stocker-screener",
  "tempfile",
@@ -6211,6 +6228,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stocker-core",
+ "stocker-domain",
  "stocker-mf",
  "stocker-portfolio",
  "stocker-screener",

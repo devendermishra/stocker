@@ -4,7 +4,8 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use crate::models::BankingMetrics;
+use stocker_domain::models::BankingMetrics;
+use stocker_domain::resolve_india_symbol;
 
 /// Environment variable pointing to a local CSV containing bank metrics keyed by symbol.
 ///
@@ -40,7 +41,7 @@ fn load_bank_metrics_map() -> Option<HashMap<String, BankingMetrics>> {
     let mut out = HashMap::new();
     for row in rdr.deserialize::<BankMetricsCsvRow>().flatten() {
         let ctx = crate::default_india_symbol_context();
-        let sym = crate::resolve_india_symbol(&row.symbol, &ctx)
+        let sym = resolve_india_symbol(&row.symbol, &ctx)
             .ok()
             .unwrap_or(row.symbol);
         out.insert(

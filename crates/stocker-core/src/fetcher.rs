@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 
 use chrono::{NaiveDate, TimeZone, Utc};
 
-use crate::models::{
+use stocker_domain::models::{
     AnalystRecommendationPeriod, AnalystRecommendations, AssetProfile, BalanceSheetRow,
     CashflowRow, ChartBar, ChartDividendEvent, ChartEvents, ChartHistory, ChartSplitEvent,
     Financials, IncomeStatementRow, InsiderTransaction, InstitutionalHolder, MarketSignals, NewsItem,
@@ -109,7 +109,7 @@ pub async fn fetch_price(symbol: &str) -> f64 {
 
 fn end_ts_from_value(end_date: &Value) -> Option<i64> {
     if let Some(fmt) = end_date.get("fmt").and_then(|x| x.as_str()) {
-        if let Some(d) = crate::statements::parse_period_end_date(fmt) {
+        if let Some(d) = stocker_domain::statements::parse_period_end_date(fmt) {
             return d.and_hms_opt(0, 0, 0).map(|n| n.and_utc().timestamp());
         }
     }
@@ -547,8 +547,8 @@ fn parse_statement_result(result: &Value) -> StatementBundle {
 pub async fn fetch_statement_bundle(symbol: &str) -> StatementBundle {
     let mut bundle = crate::fundamentals_timeseries::fetch_statement_bundle_timeseries(symbol).await;
     if statement_bundle_usable(&bundle) {
-        let q_end = crate::statements::latest_quarter_end(&bundle);
-        let fy_end = crate::statements::latest_fiscal_year_end(&bundle);
+        let q_end = stocker_domain::statements::latest_quarter_end(&bundle);
+        let fy_end = stocker_domain::statements::latest_fiscal_year_end(&bundle);
         let suspicious = bundle.income_quarterly.is_empty()
             || (q_end.is_some() && q_end == fy_end);
         if suspicious {
@@ -563,12 +563,12 @@ pub async fn fetch_statement_bundle(symbol: &str) -> StatementBundle {
 
 fn merge_income_quarterly_by_date(target: &mut StatementBundle, extra: Vec<IncomeStatementRow>) {
     for row in extra {
-        let d = crate::statements::parse_period_end_date(&row.end_date_fmt);
+        let d = stocker_domain::statements::parse_period_end_date(&row.end_date_fmt);
         if d.is_none() {
             continue;
         }
         let exists = target.income_quarterly.iter().any(|r| {
-            crate::statements::parse_period_end_date(&r.end_date_fmt) == d
+            stocker_domain::statements::parse_period_end_date(&r.end_date_fmt) == d
         });
         if !exists {
             target.income_quarterly.push(row);
@@ -773,7 +773,7 @@ pub async fn fetch_asset_profile(symbol: &str) -> AssetProfile {
                         .as_str()
                         .or_else(|| price["fullExchangeName"].as_str());
                     Some(
-                        crate::symbol::india_exchange_label(symbol, yahoo_exchange).to_string(),
+                        stocker_domain::symbol::india_exchange_label(symbol, yahoo_exchange).to_string(),
                     )
                 },
                 currency: price["currency"].as_str().map(String::from),
@@ -1038,15 +1038,15 @@ async fn fetch_news_for_query(q: &str, news_count: u32) -> Vec<NewsItem> {
 
 /// Discover NSE peer symbols via Yahoo search using industry/sector terms.
 pub async fn discover_nse_peer_symbols(subject: &str, industry: Option<&str>, sector: Option<&str>, limit: usize) -> Vec<String> {
-    let fct = crate::financial_company::classify_financial_company(
+    let fct = stocker_domain::financial_company::classify_financial_company(
         subject,
-        &crate::models::AssetProfile {
+        &stocker_domain::models::AssetProfile {
             sector: sector.map(|s| s.to_string()),
             industry: industry.map(|s| s.to_string()),
             ..Default::default()
         },
     );
-    let curated = crate::financial_company::curated_direct_peers(subject, fct);
+    let curated = stocker_domain::financial_company::curated_direct_peers(subject, fct);
     if !curated.is_empty() && fct.is_nbfc_family() {
         return curated.into_iter().take(limit).collect();
     }
@@ -1116,16 +1116,16 @@ async fn yahoo_search_nse_peers(subject: &str, query: &str, limit: usize) -> Vec
 }
 
 fn fallback_peer_symbols(subject: &str, industry: Option<&str>, sector: Option<&str>, limit: usize) -> Vec<String> {
-    let fct = crate::financial_company::classify_financial_company(
+    let fct = stocker_domain::financial_company::classify_financial_company(
         subject,
-        &crate::models::AssetProfile {
+        &stocker_domain::models::AssetProfile {
             sector: sector.map(|s| s.to_string()),
             industry: industry.map(|s| s.to_string()),
             ..Default::default()
         },
     );
     if fct.is_nbfc_family() {
-        return crate::financial_company::curated_direct_peers(subject, fct)
+        return stocker_domain::financial_company::curated_direct_peers(subject, fct)
             .into_iter()
             .take(limit)
             .collect();
@@ -1420,7 +1420,7 @@ mod tests {
         build_news_relevance_tokens, fallback_peer_symbols, news_relevance_score,
         parse_chart_dividends, parse_chart_splits, sector_news_relevance,
     };
-    use crate::yahoo_metrics::normalize_debt_to_equity;
+    use stocker_domain::normalize_debt_to_equity;
 
     #[test]
     fn normalize_debt_to_equity_scales_yahoo_percent_values() {

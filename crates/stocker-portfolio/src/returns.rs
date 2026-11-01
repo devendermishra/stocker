@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use chrono::{NaiveDate, Utc};
-use stocker_core::math::cagr;
+use stocker_domain::math::cagr;
 
-use crate::models::{Transaction, TransactionType};
+use stocker_domain::portfolio::models::{Transaction, TransactionType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnMethod {
@@ -355,7 +355,7 @@ fn bisect_xirr(mut lo: f64, mut hi: f64, npv: &dyn Fn(f64) -> f64) -> Option<f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Transaction;
+    use stocker_domain::portfolio::models::Transaction;
 
     fn txn(
         txn_type: TransactionType,

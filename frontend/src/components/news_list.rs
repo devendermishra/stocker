@@ -1,8 +1,5 @@
 use dioxus::prelude::*;
 
-#[cfg(feature = "web")]
-use crate::web_types;
-
 #[component]
 pub fn NewsList(items: Vec<(String, String, String)>) -> Element {
     rsx! {
@@ -32,21 +29,7 @@ pub trait NewsTriplet {
     fn published_at(&self) -> &str;
 }
 
-#[cfg(feature = "web")]
-impl NewsTriplet for web_types::NewsItem {
-    fn title(&self) -> &str {
-        &self.title
-    }
-    fn link(&self) -> &str {
-        &self.link
-    }
-    fn published_at(&self) -> &str {
-        &self.published_at
-    }
-}
-
-#[cfg(feature = "desktop")]
-impl NewsTriplet for stocker_core::NewsItem {
+impl NewsTriplet for stocker_domain::NewsItem {
     fn title(&self) -> &str {
         &self.title
     }

@@ -5,7 +5,12 @@ use std::sync::{Arc, Mutex};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use stocker_mf::{db::default_db_path as mf_db_path, MfService};
-use stocker_portfolio::{db::default_db_path, LabelEntityType, PortfolioService, PortfolioViewOptions};
+use stocker_domain::portfolio::models::{
+    LabelEntityType, NewLabel as DomainNewLabel, NewPortfolio as DomainNewPortfolio,
+    NewTransaction as DomainNewTransaction, RegisterMfSchedule as DomainRegisterMfSchedule,
+    UpdatePortfolio as DomainUpdatePortfolio,
+};
+use stocker_portfolio::{db::default_db_path, PortfolioService, PortfolioViewOptions};
 
 use super::{
     AllocationRow, Dashboard, FifoLot, Holding, ImportApplyRequest, ImportField, ImportResult,
@@ -90,7 +95,7 @@ pub async fn list_portfolios(include_archived: bool) -> Result<Vec<Portfolio>, S
 
 pub async fn create_portfolio(input: &NewPortfolio) -> Result<Portfolio, String> {
     let c = ctx().await?;
-    let input: stocker_portfolio::NewPortfolio = convert(input)?;
+    let input: DomainNewPortfolio = convert(input)?;
     convert(
         c.svc
             .create_portfolio(c.uid, &input)
@@ -101,7 +106,7 @@ pub async fn create_portfolio(input: &NewPortfolio) -> Result<Portfolio, String>
 
 pub async fn update_portfolio(id: i64, input: &UpdatePortfolio) -> Result<Portfolio, String> {
     let c = ctx().await?;
-    let input: stocker_portfolio::UpdatePortfolio = convert(input)?;
+    let input: DomainUpdatePortfolio = convert(input)?;
     convert(
         c.svc
             .update_portfolio(c.uid, id, &input)
@@ -122,7 +127,7 @@ pub async fn list_labels() -> Result<Vec<Label>, String> {
 
 pub async fn create_label(input: &NewLabel) -> Result<Label, String> {
     let c = ctx().await?;
-    let input: stocker_portfolio::NewLabel = convert(input)?;
+    let input: DomainNewLabel = convert(input)?;
     convert(c.svc.create_label(c.uid, &input).await.map_err(map_err)?)
 }
 
@@ -164,7 +169,7 @@ pub async fn list_transactions(filter: &TransactionFilter) -> Result<Vec<Transac
 
 pub async fn create_transaction(input: &NewTransaction) -> Result<Transaction, String> {
     let c = ctx().await?;
-    let input: stocker_portfolio::NewTransaction = convert(input)?;
+    let input: DomainNewTransaction = convert(input)?;
     let txn = convert(
         c.svc
             .create_transaction(c.uid, &input)
@@ -177,7 +182,7 @@ pub async fn create_transaction(input: &NewTransaction) -> Result<Transaction, S
 
 pub async fn update_transaction(id: i64, input: &NewTransaction) -> Result<Transaction, String> {
     let c = ctx().await?;
-    let input: stocker_portfolio::NewTransaction = convert(input)?;
+    let input: DomainNewTransaction = convert(input)?;
     let txn = convert(
         c.svc
             .update_transaction(c.uid, id, &input)
@@ -334,7 +339,7 @@ pub async fn register_mf_schedule(
     input: &RegisterMfSchedule,
 ) -> Result<RegisterMfScheduleResult, String> {
     let c = ctx().await?;
-    let input: stocker_portfolio::RegisterMfSchedule = convert(input)?;
+    let input: DomainRegisterMfSchedule = convert(input)?;
     let result: RegisterMfScheduleResult = convert(
         c.svc
             .register_mf_schedule(c.uid, portfolio_id, &input)

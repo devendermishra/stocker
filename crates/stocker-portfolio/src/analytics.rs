@@ -8,19 +8,20 @@ use sqlx::SqlitePool;
 use crate::engine::snapshot::{
     self, ensure_ledger, load_valuation, save_valuation, SymbolPrice, STOCK_PRICE_TTL_SECS,
 };
-use crate::engine::{RebuildResult, SymbolStats};
+use crate::engine::RebuildResult;
+use stocker_domain::portfolio::SymbolStats;
 use crate::error::Result;
 use crate::labels;
-use crate::models::{
+use stocker_domain::portfolio::models::{
     holding_entity_id, AllocationRow, Holding, LabelEntityType, PortfolioSummary, Transaction,
 };
 use crate::returns::{self, ReturnMethod};
 use stocker_core::fetcher::fetch_price;
-use stocker_mf::{is_mutual_fund_symbol, parse_mf_symbol};
+use stocker_domain::mf::{is_mutual_fund_symbol, mf_symbol, parse_mf_symbol};
 use stocker_screener::snapshot_is_fresh;
 use crate::portfolios;
 use crate::transactions::{self, TransactionFilter};
-use crate::models::Label as LabelModel;
+use stocker_domain::portfolio::models::Label as LabelModel;
 
 use super::PortfolioService;
 
@@ -172,7 +173,7 @@ impl PortfolioService {
                 .resolve_by_name(trimmed)
                 .await
                 .map_err(|e| crate::error::Error::InvalidInput(e.to_string()))?;
-            return Ok(stocker_mf::mf_symbol(code));
+            return Ok(mf_symbol(code));
         }
 
         self.resolve_equity_symbol(trimmed).await
@@ -185,7 +186,7 @@ impl PortfolioService {
             }
         }
         let ctx = stocker_core::default_india_symbol_context();
-        stocker_core::resolve_india_symbol(trimmed, &ctx)
+        stocker_domain::resolve_india_symbol(trimmed, &ctx)
             .map_err(|e| crate::error::Error::InvalidInput(e.to_string()))
     }
 }

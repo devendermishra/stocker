@@ -4,23 +4,8 @@ use crate::components::{news_triples, NewsList};
 use crate::report::CARD;
 use crate::routes::Route;
 use crate::sectors::SectorResearchCompact;
-use crate::sectors_api::{encode_sector_path, SectorResearchProfileView};
+use crate::sectors_api::encode_sector_path;
 use crate::types::ResearchReport;
-
-fn research_view(r: &ResearchReport) -> Option<SectorResearchProfileView> {
-    #[cfg(feature = "web")]
-    {
-        r.sector_analysis.research.clone()
-    }
-    #[cfg(feature = "desktop")]
-    {
-        r.sector_analysis.research.as_ref().and_then(|p| {
-            serde_json::to_value(p)
-                .ok()
-                .and_then(|v| serde_json::from_value(v).ok())
-        })
-    }
-}
 
 pub fn sector_tab(r: &ResearchReport) -> Element {
     let card = CARD;
@@ -35,7 +20,7 @@ pub fn sector_tab(r: &ResearchReport) -> Element {
                 .clone()
                 .filter(|s| !s.is_empty())
         });
-    let research = research_view(r);
+    let research = r.sector_analysis.research.clone();
 
     rsx! {
         section { style: "{card}",

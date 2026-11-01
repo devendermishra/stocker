@@ -21,10 +21,13 @@ flowchart TB
     Axum[stocker-api Axum :8080]
   end
 
-  subgraph core [Domain core]
+  subgraph domain [Domain rules]
+    Domain[stocker-domain]
+  end
+
+  subgraph core [Market data]
     Report[build_research_report]
     Fetch[fetcher.rs Yahoo HTTP]
-    Analysis[analysis / valuation / technical / scoring]
   end
 
   subgraph screener [Screener subsystem]
@@ -47,12 +50,14 @@ flowchart TB
   Axum --> Report
   Axum --> Svc
   Report --> Fetch
-  Report --> Analysis
+  Report --> Domain
   Svc --> SQLite
   Svc --> Scheduler
   Svc --> Query
   Scheduler --> Fetch
   Fetch --> Yahoo
+  Query --> Domain
+  Fetch --> Domain
 ```
 
 ---
@@ -61,11 +66,15 @@ flowchart TB
 
 | Node | Path | Role |
 |------|------|------|
-| **stocker-core** | [`crates/stocker-core/`](../crates/stocker-core/) | Fetch, models, analysis, `build_research_report` |
-| **stocker-screener** | [`crates/stocker-screener/`](../crates/stocker-screener/) | SQLite snapshots, metric catalog, refresh scheduler, AND filters |
+| **stocker-domain** | [`crates/stocker-domain/`](../crates/stocker-domain/) | Pure rules: research models, scoring, screener catalog and compute, portfolio FIFO, mutual-fund stamp duty. No HTTP, SQLite, or filesystem |
+| **stocker-core** | [`crates/stocker-core/`](../crates/stocker-core/) | Yahoo fetch and `build_research_report` orchestration |
+| **stocker-screener** | [`crates/stocker-screener/`](../crates/stocker-screener/) | SQLite snapshots, refresh scheduler, SQL for AND filters |
+| **stocker-mf** | [`crates/stocker-mf/`](../crates/stocker-mf/) | mfapi.in fetch and `mf.db` |
+| **stocker-portfolio** | [`crates/stocker-portfolio/`](../crates/stocker-portfolio/) | `portfolio.db`, import, and ledger persistence |
+| **stocker-sync** | [`crates/stocker-sync/`](../crates/stocker-sync/) | Drive vault backup |
 | **stocker-api** | [`crates/api/`](../crates/api/) | Axum HTTP server on `127.0.0.1:8080` (research + screener routes) |
 | **stocker-cli** | [`crates/cli/`](../crates/cli/) | Headless: reports, screener queries, universe sync, backfill |
-| **stocker-web** | [`frontend/`](../frontend/) | Dioxus UI — research + screener (not Tauri, not npm) |
+| **stocker-web** | [`frontend/`](../frontend/) | Dioxus UI — research + screener (not Tauri, not npm). Both modes share `stocker-domain` types |
 
 Workspace root: [`Cargo.toml`](../Cargo.toml)
 
@@ -87,34 +96,40 @@ See [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md) for full steps, env vars, and trouble
 
 ## Backend architecture
 
+### Domain modules ([`stocker-domain/src/`](../crates/stocker-domain/src/))
+
+Rules only (`serde`, `serde_json`, `thiserror`, `chrono` dates). Callers pass `as_of`; the clock stays in the orchestrator.
+
+| Module | Responsibility |
+|--------|----------------|
+| `models.rs` / `report.rs` | Serde types, including `ResearchReport` |
+| `analysis.rs`, `valuation_analysis.rs`, `fundamental_analysis.rs`, `technical_analysis.rs`, `technical_entry_signal.rs`, `stock_scoring.rs`, `research_summary.rs` | Research heuristics |
+| `sector_research.rs` | Porter Five Forces, lifecycle, sector type, demand–supply, competition, profitability, growth |
+| `math.rs`, `statements.rs`, `ratios.rs`, `canonical.rs`, `series_integrity.rs` | Shared calculations |
+| `symbol.rs` | Ticker normalization and NSE CSV *bytes* parsing |
+| `screener/` | Metric catalog, `compute_all`, and the `ScreenQuery` model |
+| `portfolio/` | Transaction types and pure FIFO replay |
+| `mf/` | Stamp duty, trading-day calendar, `MF:{code}` symbols |
+
 ### Core modules ([`stocker-core/src/`](../crates/stocker-core/src/))
 
 | Module | Responsibility |
 |--------|----------------|
 | `fetcher.rs` | Yahoo HTTP, crumb auth, JSON parsing |
-| `math.rs` | Shared `pct_change`, `cagr`, `median` (used by analysis + screener compute) |
-| `statements.rs` | Statement row sorting helpers (`income_annual_asc`, `annual_desc`, etc.) |
-| `symbol.rs` | `RELIANCE` → `RELIANCE.NS`, NSE CSV column detection (`nse_csv_indices`) |
-| `models.rs` | Serde types (`Financials`, `ResearchReport` inputs, etc.) |
-| `report.rs` | Orchestration: parallel fetch → analysis → `ResearchReport` |
-| `analysis.rs` | Stock, management, sector, peer heuristics |
-| `sector_research.rs` | Porter Five Forces + lifecycle/type/industry profile heuristics |
-| `fundamental_analysis.rs` | Statement-based fundamentals |
-| `valuation_analysis.rs` | Multiples, historical bands, peer compare |
-| `technical_analysis.rs` | SMA, RSI, MACD, volume, ATR from chart bars |
-| `technical_entry_signal.rs` | Entry zone heuristics |
-| `stock_scoring.rs` | Composite `ResearchRating` |
-| `research_summary.rs` | `CompanyOverview`, `ResearchSummary` |
+| `yahoo_metrics.rs` | Map Yahoo JSON into domain financials |
+| `symbol.rs` | Load `data/EQUITY_L.csv` from disk |
+| `report.rs` | Orchestration: parallel fetch → domain analysis → `ResearchReport` |
+| `bank_metrics.rs` | Bank metric CSV load |
+| `sector.rs` | Sector outlook HTTP |
+| `paths.rs` | Database and config paths |
 
 ### Screener modules ([`stocker-screener/src/`](../crates/stocker-screener/src/))
 
 | Module | Responsibility |
 |--------|----------------|
 | `db.rs` | SQLite pool, migrations, schema validation |
-| `metrics.rs` | Metric catalog (~110 fields, categories, units) |
 | `snapshot.rs` | Upsert symbol + metric rows from Yahoo fetch |
-| `compute.rs` | Metric engine: `compute_all` delegates to section functions (`compute_price_metrics`, `compute_valuation_metrics`, …) via `ComputeContext` |
-| `query.rs` | `ScreenQuery` → SQL (AND filters, sort, limit) |
+| `query.rs` | Render a domain `ScreenQuery` as SQL |
 | `refresh.rs` | Tiered scheduler, pacing, backfill |
 | `service.rs` | Public façade (`ScreenerService`) for API + desktop |
 | `screens.rs` | Saved screen CRUD |
@@ -145,7 +160,7 @@ See [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md) for full steps, env vars, and trouble
 - `GET /api/v1/sectors` — distinct Yahoo sectors + summary badges (lifecycle, type, attractiveness, growth)
 - `GET /api/v1/sectors/{sector}` — full heuristic `SectorResearchProfile` + top members by mcap
 
-Profiles are **computed on read** from screener `symbols` + `snapshots` (no separate sector cache). Heuristics live in [`crates/stocker-core/src/sector_research.rs`](../crates/stocker-core/src/sector_research.rs): Porter Five Forces, lifecycle, sector type, demand–supply gap, competition, profitability, growth prospects, supplier/customer pricing power.
+Profiles are **computed on read** from screener `symbols` + `snapshots` (no separate sector cache). Heuristics live in [`crates/stocker-domain/src/sector_research.rs`](../crates/stocker-domain/src/sector_research.rs): Porter Five Forces, lifecycle, sector type, demand–supply gap, competition, profitability, growth prospects, supplier/customer pricing power.
 
 ### Entry points → core / screener
 
@@ -185,15 +200,15 @@ flowchart LR
 
 | Mode | Feature | Target | Backend connection | API required? |
 |------|---------|--------|-------------------|---------------|
-| **Web / API mode** | `web` (default) | `wasm32-unknown-unknown` | HTTP to `stocker-api` (research + screener) | Yes |
-| **Desktop / standalone** | `desktop` | Native OS binary | `stocker_core` + `stocker_screener` in-process | No |
+| **Web / API mode** | `web` (default) | `wasm32-unknown-unknown` | HTTP to `stocker-api` (research + screener). Types come from `stocker-domain` | Yes |
+| **Desktop / standalone** | `desktop` | Native OS binary | `stocker_core` + `stocker_screener` + `stocker_portfolio` in-process, sharing `stocker-domain` types | No |
 
 Central switches:
 
 - **Research:** [`frontend/src/api.rs`](../frontend/src/api.rs) — web: `gloo_net::Request::get`; desktop: `stocker_core::build_research_report`
 - **Screener:** [`frontend/src/screener_api.rs`](../frontend/src/screener_api.rs) — web: HTTP to `/api/v1/screener/*`; desktop: `ScreenerService` methods
 
-WASM cannot link `stocker-core` or `stocker-screener` (no native HTTP/SQLite stack on wasm32); standalone direct mode is **native desktop only**.
+WASM links `stocker-domain` for the shared report and screener types. It does not link `stocker-core` or `stocker-screener` (no native HTTP/SQLite stack on wasm32); standalone direct mode is **native desktop only**.
 
 ### UI routes and tabs
 
@@ -368,7 +383,7 @@ sequenceDiagram
 
 ### Pipeline stages inside `build_research_report` ([`report.rs`](../crates/stocker-core/src/report.rs))
 
-1. **Normalize** symbol to `*.NS` via [`symbol.rs`](../crates/stocker-core/src/symbol.rs)
+1. **Normalize** symbol to `*.NS` via [`stocker-domain` `symbol.rs`](../crates/stocker-domain/src/symbol.rs) (NSE universe file load stays in [`stocker-core` `symbol.rs`](../crates/stocker-core/src/symbol.rs))
 2. **Parallel fetch** (8 calls via `tokio::join!`): price, financials, shareholders, annual reports, officer pay, asset profile, statement bundle, 5y chart
 3. **Enrich** net income from annual reports if Yahoo TTM is ≤ 0
 4. **News**: company news (search by symbol/name/sector/industry), sector news
